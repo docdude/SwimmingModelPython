@@ -1,0 +1,12 @@
+__pycache__/
+.DS_Store
+.vscode
+data/
+swim_v2/__pycache__
+swim_v2/.DS_Store
+swim_v2/logs
+swim_v2/logs/fit
+swim_v2/data_copy
+swim_v2/hyperparameter*
+swim_v2/tutorial_save*
+swim_v2/run_*
