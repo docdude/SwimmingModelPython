@@ -1,6 +1,6 @@
 import tensorflow as tf
 import os
-
+import tensorflow_addons as tfa
 def weighted_binary_crossentropy(weight_zero=1.0, weight_one=15.0):
     def loss(y_true, y_pred):
         y_true = tf.cast(y_true, tf.float32)
@@ -173,8 +173,6 @@ class F1Score(tf.keras.metrics.Metric):
         config.update({"threshold": self.threshold})
         return config
 
-import tensorflow as tf
-
 class F1ScoreMultiClass(tf.keras.metrics.Metric):
     def __init__(self, name='f1_score', average='macro', threshold=0.5, num_classes=None, **kwargs):
         """
@@ -294,6 +292,50 @@ class F1ScoreMultiClass(tf.keras.metrics.Metric):
         })
         return config
     
+class CombinedEarlyStopping(tf.keras.callbacks.Callback):
+    def __init__(self, monitor1, monitor2, mode1='max', mode2='max', patience=5, restore_best_weights=True):
+        super(CombinedEarlyStopping, self).__init__()
+        self.monitor1 = monitor1
+        self.monitor2 = monitor2
+        self.mode1 = mode1
+        self.mode2 = mode2
+        self.patience = patience
+        self.restore_best_weights = restore_best_weights
+        self.best1 = -float('inf') if mode1 == 'max' else float('inf')
+        self.best2 = -float('inf') if mode2 == 'max' else float('inf')
+        self.wait = 0
+        self.best_weights = None
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        current1 = logs.get(self.monitor1)
+        current2 = logs.get(self.monitor2)
+
+        if current1 is None or current2 is None:
+            print(f"Warning: Monitor metrics {self.monitor1} or {self.monitor2} not found in logs.")
+            return
+
+        improved1 = (current1 > self.best1 if self.mode1 == 'max' else current1 < self.best1)
+        improved2 = (current2 > self.best2 if self.mode2 == 'max' else current2 < self.best2)
+
+        if improved1 or improved2:
+            self.best1 = max(current1, self.best1) if self.mode1 == 'max' else min(current1, self.best1)
+            self.best2 = max(current2, self.best2) if self.mode2 == 'max' else min(current2, self.best2)
+            self.wait = 0
+            if self.restore_best_weights:
+                self.best_weights = self.model.get_weights()
+        else:
+            self.wait += 1
+            if self.wait >= self.patience:
+                self.stopped_epoch = epoch
+                if self.restore_best_weights and self.best_weights is not None:
+                    self.model.set_weights(self.best_weights)
+                self.model.stop_training = True
+
+    def on_train_end(self, logs=None):
+        if self.stopped_epoch is not None:
+            print(f"Early stopping at epoch {self.stopped_epoch + 1}.")
+   
 def get_callbacks(model_save_path, user, log_dir):
     callbacks = [
         # Early Stopping Logger
@@ -349,6 +391,27 @@ def get_callbacks(model_save_path, user, log_dir):
     
     return callbacks
 
+def get_layers(model, layer_name_filter=None):
+    """
+    Recursively retrieve layers from a model, including wrapped layers in constructs like TimeDistributed or Bidirectional.
+    
+    :param model: The model or layer to retrieve layers from.
+    :param layer_name_filter: A substring to filter layers by name.
+    :return: A list of layers matching the filter.
+    """
+    layers = []
+    if hasattr(model, 'layers'):  # Check if the model or layer has sub-layers
+        for layer in model.layers:
+            layers.extend(get_layers(layer, layer_name_filter))
+    else:
+        layers = [model]  # Base case: This is a single layer
+
+    # Apply name filter if provided
+    if layer_name_filter:
+        layers = [layer for layer in layers if layer_name_filter in layer.name]
+    return layers
+
+
 class MultiOptimizer(tf.keras.optimizers.Optimizer):
     def __init__(self, optimizers_and_layers):
         super(MultiOptimizer, self).__init__(name="MultiOptimizer")
@@ -386,9 +449,9 @@ class MultiOptimizer(tf.keras.optimizers.Optimizer):
 def compile_model(data_parameters, model, training_parameters, class_weights=None):
 
     if data_parameters['label_type'] == 'sparse':
-        type_categorical_crossentropy = 'sparse_categorical_crossentropy'
+        type_categorical_crossentropy = tf.keras.losses.SparseCategoricalCrossentropy()#'sparse_categorical_crossentropy'
     else:
-        type_categorical_crossentropy = 'categorical_crossentropy'
+        type_categorical_crossentropy = tf.keras.losses.CategoricalCrossentropy() #'categorical_crossentropy'
 
     if training_parameters['swim_style_output'] and training_parameters['stroke_label_output']:
         # Get layers for each branch
@@ -396,15 +459,15 @@ def compile_model(data_parameters, model, training_parameters, class_weights=Non
                             if 'swim_style' in layer.name]
         stroke_layers = [layer for layer in model.layers 
                         if 'stroke' in layer.name]
-            # Debug print
+         # Debug print
         if data_parameters['debug']:
             print("\nSwim Style Layers:")
             for layer in swim_style_layers:
-                print(f"  {layer.name}")
+                print(f"  {layer.name, layer.trainable}")
         
             print("\nStroke Layers:")
             for layer in stroke_layers:
-                print(f"  {layer.name}")
+                print(f"  {layer.name, layer.trainable}")
 
         # Create optimizers with explicit learning rates
         swim_style_optimizer = tf.keras.optimizers.Adam(
@@ -414,6 +477,12 @@ def compile_model(data_parameters, model, training_parameters, class_weights=Non
         )
 
         stroke_optimizer = tf.keras.optimizers.Adam(
+            learning_rate=training_parameters['stroke_lr'],  
+            beta_1=training_parameters['beta_1'],
+            beta_2=training_parameters['beta_2']
+        )
+        """
+        stroke_optimizer = tf.keras.optimizers.Adam(
             learning_rate=tf.keras.optimizers.schedules.ExponentialDecay(
                 initial_learning_rate=training_parameters['stroke_lr']['initial_lr'],
                 decay_steps=training_parameters['stroke_lr']['decay_steps'],
@@ -422,18 +491,25 @@ def compile_model(data_parameters, model, training_parameters, class_weights=Non
             beta_1=training_parameters['beta_1'],
             beta_2=training_parameters['beta_2']
         )
-
+        """
         # Combine optimizers
-        optimizer = MultiOptimizer([
-            (swim_style_optimizer, swim_style_layers),
-            (stroke_optimizer, stroke_layers)
-        ])
+ #       optimizer = MultiOptimizer([
+  #          (swim_style_optimizer, swim_style_layers),
+   #         (stroke_optimizer, stroke_layers)
+    #    ])
+        optimizers_and_layers = [(swim_style_optimizer, swim_style_layers), (stroke_optimizer, stroke_layers)]
+        optimizer = tfa.optimizers.MultiOptimizer(optimizers_and_layers)
         loss={
             'swim_style_output': type_categorical_crossentropy,
-            'stroke_label_output': weighted_binary_crossentropy_smooth_class(class_weights)
+            'stroke_label_output': tf.keras.losses.BinaryCrossentropy(label_smoothing=0.1)
+                                #weighted_binary_crossentropy_smooth_class(class_weights)
         }
         metrics={
-            'swim_style_output': ['accuracy'],
+            'swim_style_output': [
+                tf.keras.metrics.CategoricalAccuracy(name='categorical_accuracy'),
+                tf.keras.metrics.Precision(name='precision'),
+                tf.keras.metrics.Recall(name='recall')
+            ],
             'stroke_label_output': [
                 tf.keras.metrics.BinaryAccuracy(name='accuracy', threshold=0.5),
                 tf.keras.metrics.Precision(name='precision', thresholds=0.5),
@@ -442,7 +518,11 @@ def compile_model(data_parameters, model, training_parameters, class_weights=Non
             ]
         }
         weighted_metrics={
-            'swim_style_output': ['weighted_accuracy'],
+            'swim_style_output': [
+                tf.keras.metrics.CategoricalAccuracy(name='weighted_categorical_accuracy'),
+                tf.keras.metrics.Precision(name='weighted_precision'),
+                tf.keras.metrics.Recall(name='weighted_recall')
+            ],
             'stroke_label_output': [
                 tf.keras.metrics.BinaryAccuracy(name='weighted_accuracy', threshold=0.5),
                 tf.keras.metrics.Precision(name='weighted_precision', thresholds=0.5),
@@ -481,6 +561,12 @@ def compile_model(data_parameters, model, training_parameters, class_weights=Non
         }
     else:
         stroke_optimizer = tf.keras.optimizers.Adam(
+            learning_rate=training_parameters['stroke_lr'],  
+            beta_1=training_parameters['beta_1'],
+            beta_2=training_parameters['beta_2']
+        )
+        """
+        stroke_optimizer = tf.keras.optimizers.Adam(
             learning_rate=tf.keras.optimizers.schedules.ExponentialDecay(
                 initial_learning_rate=training_parameters['stroke_lr']['initial_lr'],
                 decay_steps=training_parameters['stroke_lr']['decay_steps'],
@@ -489,6 +575,7 @@ def compile_model(data_parameters, model, training_parameters, class_weights=Non
             beta_1=training_parameters['beta_1'],
             beta_2=training_parameters['beta_2']
         )
+        """
         optimizer = stroke_optimizer
         loss = {
             'stroke_label_output': tf.keras.losses.BinaryCrossentropy(label_smoothing=0.1)

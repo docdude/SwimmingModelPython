@@ -7,6 +7,7 @@ import cnn_vanilla5 #convtranspose layer to upsample no dense conv1d sigmoid fin
 import cnn_vanilla6 #single dense layer using swim_style_branch final connected dense
 import test_lstm
 import test_lstm3
+import lstm_dual
 import utils
 import learning_data
 import os
@@ -22,9 +23,9 @@ from sklearn.utils import class_weight
 data_path = '/Users/juanloya/Documents/SwimmingModelPython/swim_v2/data_modified_users'
 
 # Path to where we want to save the training results
-save_path = '/Users/juanloya/Documents/SwimmingModelPython/swim_v2/tutorial_save_path_epoch_BiLSTM3_weighted'
-#save_path = '/Users/juanloya/Documents/SwimmingModelPython/swim_v2/tutorial_save_path_epochLSTM3_weighted'
-run_name = 'BiLSTM3_weighted'
+run_name = 'stroke_lstm_1_weighted'
+base_path = '/Users/juanloya/Documents/SwimmingModelPython/swim_v2'
+save_path = os.path.join(base_path, f'run_{run_name}')
 # A list of user names which are loaded.
 
 users_all = utils.folders_in_path(data_path)
@@ -61,7 +62,6 @@ data_parameters = {'users':                users,   # Users whose data is loaded
                         2: 1,  # Backstroke
                         3: 1,  # Breaststroke
                         4: 1,  # Butterfly
-                        'stroke_labels': ['stroke_labels'],  # Track stroke labels separately
                    },
                    }
 

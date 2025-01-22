@@ -1,7 +1,7 @@
 # tune_cnn.py
 import tensorflow as tf
 from keras_tuner import HyperModel, RandomSearch, BayesianOptimization
-from utils_train import compile_model, weighted_binary_crossentropy_smooth_class, EarlyStoppingLogger
+from utils_train import compile_model, weighted_binary_crossentropy_smooth_class, EarlyStoppingLogger, CombinedEarlyStopping
 import keras_tuner as kt
 import pickle
 import os
@@ -31,8 +31,9 @@ def get_default_training_parameters():
                         'group_probs':     {'original': 0.7, 'time_scaled_0.9': 0.15, 'time_scaled_1.1': 0.15},
                         'labels':          [0, 1, 2, 3, 4],
                         'stroke_labels': ['stroke_labels'],  # Labels for stroke predictions
-                        'stroke_label_output':     True,
-                        'swim_style_output':      False
+                        'stroke_label_output':      True,
+                        'swim_style_output':        True,
+                        'output_bias':              None
                         }
     return training_parameters
 
@@ -175,6 +176,11 @@ class SwimStrokeHyperModel(HyperModel):
             if self.training_parameters['stroke_label_output']
             else None
         )
+        # Add learning rate tuning
+        swim_style_lr = hp.Float('swim_style_lr', min_value=1e-5, max_value=1e-2, sampling='log')
+        stroke_lr = hp.Float('stroke_lr', min_value=1e-5, max_value=1e-2, sampling='log')
+        self.training_parameters['swim_style_lr'] = swim_style_lr
+        self.training_parameters['stroke_lr']= stroke_lr
 
         try:
             # Validate hyperparameters before model creation
@@ -213,12 +219,12 @@ def cnn_model(input_shape, swim_model_parameters=None, stroke_model_parameters=N
     # Build swim style branch if swim_model_parameters are provided
     swim_style_output = None
     if swim_model_parameters is not None and training_parameters['swim_style_output']:
-        swim_style_output = swim_style_model(inputs, swim_model_parameters)
+        swim_style_output = swim_style_model(inputs, swim_model_parameters, output_bias=None)
 
     # Build stroke branch if stroke_model_parameters are provided
     stroke_label_output = None
     if stroke_model_parameters is not None and training_parameters['stroke_label_output']:
-        stroke_label_output = stroke_model(inputs, stroke_model_parameters)
+        stroke_label_output = stroke_model(inputs, stroke_model_parameters, output_bias=training_parameters['output_bias'])
 
     # Combine outputs based on the branches enabled
     if swim_style_output is not None and stroke_label_output is not None:
@@ -284,9 +290,9 @@ def swim_style_model(inputs, swim_model_parameters, use_seed=True, output_bias=N
         # Handle different activation functions
         activation_function = swim_model_parameters['activation'][cnt_layer]
         if activation_function == 'leaky_relu':
-            swim_style_branch = tf.keras.layers.LeakyReLU(alpha=0.2, name=f'swim_activation_{i}')(swim_style_branch)
+            swim_style_branch = tf.keras.layers.LeakyReLU(alpha=0.2, name=f'swim_style_activation_{i}')(swim_style_branch)
         else:
-            swim_style_branch = tf.keras.layers.Activation(activation_function, name=f'swim_activation_{i}')(swim_style_branch)
+            swim_style_branch = tf.keras.layers.Activation(activation_function, name=f'swim_style_activation_{i}')(swim_style_branch)
         max_pooling = swim_model_parameters['max_pooling'][i]
         if max_pooling != 0:
             swim_style_branch = tf.keras.layers.MaxPooling2D(
@@ -382,10 +388,8 @@ def stroke_model(inputs, stroke_model_parameters, use_seed=True, output_bias=Non
             if stroke_model_parameters['l2_reg'][cnt_layer] != 0
             else None
         )
-        if i == 0: 
-            kernel_initializer=tf.keras.initializers.he_normal(seed=use_seed and 1337)
-        else:
-            kernel_initializer=tf.keras.initializers.glorot_normal(seed=use_seed and 1337)
+
+        kernel_initializer=tf.keras.initializers.he_normal(seed=use_seed and 1337)
 
         strides = stroke_model_parameters['strides'][i]
         strides = 1 if strides == 0 else (strides, 1)
@@ -430,18 +434,19 @@ def stroke_model(inputs, stroke_model_parameters, use_seed=True, output_bias=Non
         cnt_layer += 1
 
     # Apply global pooling to the attention tensor
-    attention = tf.keras.layers.GlobalAveragePooling2D(name='attention_global_pooling')(attention)
+    attention = tf.keras.layers.GlobalAveragePooling2D(name='stroke_attention_global_pooling')(attention)
 
     # Expand dimensions of the attention tensor to match the feature tensor
     attention = tf.keras.layers.Dense(
         units=stroke_branch.shape[-1],  # Match the number of filters in the feature tensor
         activation='sigmoid',  # Use sigmoid to scale attention values between 0 and 1
-        name='attention_dense'
+        kernel_initializer=tf.keras.initializers.glorot_uniform(seed=use_seed and 1337),
+        name='stroke_attention_dense'
     )(attention)
-    attention = tf.keras.layers.Reshape((1, 1, stroke_branch.shape[-1]), name='attention_reshape')(attention)
+    attention = tf.keras.layers.Reshape((1, 1, stroke_branch.shape[-1]), name='stroke_attention_reshape')(attention)
 
     # Multiply attention with features
-    stroke_branch = tf.keras.layers.Multiply(name='stroke_attention')([stroke_branch, attention])
+    stroke_branch = tf.keras.layers.Multiply(name='stroke_multiply')([stroke_branch, attention])
 
     
     # Reshape to (batch, time, features)
@@ -476,7 +481,7 @@ def stroke_model(inputs, stroke_model_parameters, use_seed=True, output_bias=Non
     if stroke_model_parameters['final_dropout'] > 0.0:
         stroke_branch = tf.keras.layers.Dropout(
             stroke_model_parameters['final_dropout'],
-            name='stroke_lstm_dropout'
+            name='stroke_final_dropout'
         )(stroke_branch)
 
     stroke_branch = tf.keras.layers.LayerNormalization(
@@ -517,17 +522,27 @@ def get_tensorboard_callback(log_dir):
     )
     return tensorboard_callback
 
+def combined_metric(logs, alpha=0.5):
+    """
+    Combine two metrics with a weighted harmonic mean.
+    
+    :param logs: Dictionary containing logged metrics (e.g., logs from callbacks).
+    :param alpha: Weight for the first metric (0 ≤ alpha ≤ 1). The second metric weight will be 1 - alpha.
+    :return: Combined metric value.
+    """
+    metric1 = logs.get('val_weighted_f1_score', 0.0)  # Stroke branch
+    metric2 = logs.get('val_weighted_categorical_accuracy', 0.0)  # Swim style branch
+    
+    # Avoid division by zero
+    if metric1 == 0 or metric2 == 0:
+        return 0.0
+    
+    # Calculate the weighted harmonic mean
+    harmonic_mean = 2 / ((alpha / metric1) + ((1 - alpha) / metric2))
+    return harmonic_mean
+
 
 def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters, class_weights, gen, validation_data, experiment_save_path="", callbacks=None):
-    # Initialize the tuner
-   # tuner = RandomSearch(
-   #     hypermodel=SwimStrokeHyperModel(input_shape, training_parameters, class_weights, data_parameters),
-   #     objective=kt.Objective('val_f1_score', direction='max'),  # Specify direction
-   #     max_trials=20,
-   #     executions_per_trial=2,
-   #     directory='hyperparameter_tuning',
-   #     project_name='swim_stroke_model'
-   # )
     # Create the hypermodel
     hypermodel = SwimStrokeHyperModel(input_shape, training_parameters, class_weights, data_parameters)
 
@@ -535,11 +550,19 @@ def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters,
     if hypermodel is None or not isinstance(hypermodel, HyperModel):
         print("Invalid hypermodel configuration. Skipping tuning for this trial.")
         return None  # Skip this trial
-     
-    if training_parameters['stroke_label_output']:
-        objective=kt.Objective('val_weighted_f1_score', direction='max')
-    else:
+    
+    if training_parameters['swim_style_output'] and training_parameters['stroke_label_output']:
+        # Define the combined objective
+        def combined_logs(logs):
+            alpha = 0.5  # Weight for stroke branch
+            return combined_metric(logs, alpha)
+        objective = kt.Objective(lambda logs: combined_logs(logs), direction='max')
+
+    elif training_parameters['swim_style_output']:
         objective=kt.Objective('val_weighted_categorical_accuracy', direction='max')
+    else:
+        objective=kt.Objective('val_weighted_f1_score', direction='max')
+
 
 
     # Define the Bayesian Optimization tuner
@@ -548,7 +571,7 @@ def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters,
         objective=objective,
         max_trials=100,  # Number of trials (adjust based on resources)
         num_initial_points=20,  # Number of random points to start the search
-        directory='hyperparameter_tuning_stroke100',
+        directory='hyperparameter_tuning_swim_stroke100',
         project_name='swim_stroke_model',
         max_consecutive_failed_trials=10 # Increase max_failures
 
@@ -556,7 +579,7 @@ def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters,
 
            
     # Set up TensorBoard callback
-    log_dir = f"logs/tune_stroke100/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    log_dir = f"logs/tune_swim_stroke100/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
     tensorboard_callback = get_tensorboard_callback(log_dir)
 
     # Add TensorBoard callback to the list of callbacks
@@ -573,7 +596,7 @@ def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters,
         batch_size=training_parameters['batch_size'],
         epochs=training_parameters['max_epochs'],
         steps_per_epoch=training_parameters['steps_per_epoch'],
-    #   validation_steps=training_parameters['steps_per_epoch'],  # Define a fixed number of validation steps
+      # validation_steps=training_parameters['steps_per_epoch'],  # Define a fixed number of validation steps
         callbacks=callbacks
     )
 
@@ -605,12 +628,32 @@ if __name__ == '__main__':
     if training_parameters['swim_style_output'] and training_parameters['stroke_label_output']:
         def gen():
             while True:
-                yield ([tf.random.normal((64, 180, 6, 1)), 
-                        [tf.random.uniform((64, 5), minval=0, maxval=4, dtype=tf.int32), tf.random.uniform((64, 180, 1), minval=0, maxval=2, dtype=tf.int32)]])
+                yield (
+                    tf.random.normal((64, 180, 6, 1)),  # Features
+                    {  # Labels
+                        'swim_style_output': tf.random.uniform((64, 5), minval=0, maxval=5, dtype=tf.int32),
+                        'stroke_label_output': tf.random.uniform((64, 180, 1), minval=0, maxval=2, dtype=tf.int32),
+                    }
+                )
+
         def val_gen():
             while True:
-                yield ([tf.random.normal((64, 180, 6, 1)), 
-                        [tf.random.uniform((64, 5), minval=0, maxval=4, dtype=tf.int32), tf.random.uniform((64, 180, 1), minval=0, maxval=2, dtype=tf.int32)]])
+                yield (
+                    tf.random.normal((64, 180, 6, 1)),  # Features
+                    { 
+                        'swim_style_output': tf.random.uniform((64, 5), minval=0, maxval=5, dtype=tf.int32),
+                        'stroke_label_output': tf.random.uniform((64, 180, 1), minval=0, maxval=2, dtype=tf.int32),
+                    }
+                )
+        # Set up the combined early stopping callback
+        callbacks = [CombinedEarlyStopping(
+            monitor1='val_weighted_f1_score',
+            monitor2='val_weighted_categorical_accuracy',
+            mode1='max',
+            mode2='max',
+            patience=5,
+            restore_best_weights=True
+        )]
     elif training_parameters['swim_style_output']:  # Only swim style output
         def gen():
             while True:
@@ -620,6 +663,7 @@ if __name__ == '__main__':
             while True:
                 yield ([tf.random.normal((64, 180, 6, 1)), 
                         tf.random.uniform((64, 5), minval=0, maxval=4, dtype=tf.int32)])
+        callbacks=[tf.keras.callbacks.EarlyStopping(monitor='val_weighted_categorical_accuracy', patience=10, restore_best_weights=True, mode='max')]
     else:  # Only stroke label output
         def gen():
             while True:
@@ -629,7 +673,7 @@ if __name__ == '__main__':
             while True:
                 yield ([tf.random.normal((64, 180, 6, 1)), 
                         tf.random.uniform((64, 180, 1), minval=0, maxval=2, dtype=tf.int32)])
+        callbacks=[tf.keras.callbacks.EarlyStopping(monitor='val_weighted_f1_score', patience=10, restore_best_weights=True, mode='max')]
 
-
-    best_model = run_hyperparameter_tuning(input_shape, data_parameters, training_parameters, class_weights, gen(), val_gen(), callbacks=[tf.keras.callbacks.EarlyStopping(monitor='val_weighted_f1_score', patience=5, restore_best_weights=True, mode='max')])
+    best_model = run_hyperparameter_tuning(input_shape, data_parameters, training_parameters, class_weights, gen(), val_gen(), callbacks=callbacks)
     best_model.summary()

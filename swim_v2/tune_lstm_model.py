@@ -1,5 +1,5 @@
 # A basic tutorial in how I load data and tune a model
-import tune_cnn
+import tune_lstm_dual
 import utils
 import utils_plot
 import utils_train
@@ -17,7 +17,7 @@ from sklearn.utils.class_weight import compute_sample_weight
 data_path = '/Users/juanloya/Documents/SwimmingModelPython/swim_v2/data_modified_users'
 
 # Path to where we want to save the training results
-run_name = 'tune_swim_stroke_100_weighted'
+run_name = 'tune_stroke_lstm_weighted'
 base_path = '/Users/juanloya/Documents/SwimmingModelPython/swim_v2'
 save_path = os.path.join(base_path, f'run_{run_name}')
 
@@ -158,13 +158,13 @@ training_parameters = {'swim_style_lr': 0.0005,  # Constant for swim style
                        'labels':          swimming_data.labels,
                        'stroke_labels':   swimming_data.stroke_labels,
                        'stroke_label_output':       True,
-                       'swim_style_output':         True,
-                       'ouput_bias':                None
+                       'swim_style_output':         False,
+                       'output_bias':                None
                        }
 
 # The input shape of the CNN
 #input_shape = (data_parameters['win_len'], len(data_parameters['data_columns']) + len(data_parameters['stroke_labels']), 1)
-input_shape = (data_parameters['win_len'], len(data_parameters['data_columns']), 1)
+input_shape = (data_parameters['win_len'], len(data_parameters['data_columns']))
 
 
 # Train all models
@@ -179,8 +179,6 @@ for (i, user_test) in enumerate(users_test):
     print("Running experiment: %s" % user_test)
     experiment_save_path = os.path.join(save_path, user_test)
 
-    # A path to log directory for Tensorboard
-    log_dir = f"logs/fit/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}_run-{user_test}-{run_name}"
     if os.path.exists(experiment_save_path):
         print(f"Skipping: {user_test}, already processed.")
         continue
@@ -240,7 +238,7 @@ for (i, user_test) in enumerate(users_test):
                                               noise_std=training_parameters['noise_std'],
                                               mirror_prob=training_parameters['mirror_prob'],
                                               random_rot_deg=training_parameters['random_rot_deg'],
-                                              use_4D=True,
+                                              use_4D=False,
                                               swim_style_output=training_parameters['swim_style_output'], 
                                               stroke_label_output=training_parameters['stroke_label_output'],
                                               return_stroke_mask=training_parameters['stroke_mask'])
@@ -316,9 +314,6 @@ for (i, user_test) in enumerate(users_test):
                 utils_plot.plot_batch_and_mask(batch_data, batch_outputs['stroke_label_output'], batch_sample_weights['stroke_label_output'], sample_idx=stroke_samples[0])
 
 
-    # Optimizer
-   #optimizer = tf.keras.optimizers.Adam(learning_rate=training_parameters['lr'], beta_1=training_parameters['beta_1'],
-    #                                  beta_2=training_parameters['beta_2'])
 
     # Get the validation data with weights and mask
     x_val, y_val_sparse, y_val_cat, y_stroke_val, val_sample_weights, val_stroke_mask = swimming_data.get_windows_dict(
@@ -334,7 +329,7 @@ for (i, user_test) in enumerate(users_test):
     print(f"Sample weights: {val_stroke_weights}")
     # Adjust val_sample_weights shape to match val_stroke_weights for broadcasting
     combined_weights = val_sample_weights[:, np.newaxis, np.newaxis] * val_stroke_weights
-    x_val = x_val.reshape((x_val.shape[0], x_val.shape[1], x_val.shape[2], 1))
+    #x_val = x_val.reshape((x_val.shape[0], x_val.shape[1], x_val.shape[2], 1))
 
     #callbacks = utils_train.get_callbacks(experiment_save_path, user_test, log_dir)
 
@@ -391,7 +386,7 @@ for (i, user_test) in enumerate(users_test):
     
 
         # Pass to model.fit
-    best_model = tune_cnn.run_hyperparameter_tuning(
+    best_model = tune_lstm_dual.run_hyperparameter_tuning(
         input_shape, 
         data_parameters, 
         training_parameters,

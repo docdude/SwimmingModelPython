@@ -1,5 +1,15 @@
-# A basic tutorial in how I load data and tune a model
-import tune_cnn
+# A basic tutorial in how I load data and train a model
+import cnn_vanilla1 #LSTM
+import cnn_vanilla2 #TimeDistibuted layer wrapping dense
+import cnn_vanilla3 #2 dense layers after main backbone
+import cnn_vanilla4 #single dense layer after main backbone
+import cnn_vanilla5 #convtranspose layer to upsample no dense conv1d sigmoid final
+import cnn_vanilla6 #single dense layer using swim_style_branch final connected dense
+import cnn_vanilla7 # parallel branches
+import cnn_vanilla8 # parallel branches with weighted loss
+import cnn_vanilla_dual2 # parallel branches with weighted loss
+import test_lstm
+import lstm_dual
 import utils
 import utils_plot
 import utils_train
@@ -10,14 +20,17 @@ import tensorflow as tf
 import numpy as np
 import pickle
 import datetime
+from tensorboard.plugins.hparams import api as hp
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.utils.class_weight import compute_sample_weight
 
+#tf.config.run_functions_eagerly(True)  # Run eagerly for CPU
+#tf.data.experimental.enable_debug_mode()  # Help identify input pipeline issues
 # A path to re-sampled recordings which are organized into folders by user name.
 data_path = '/Users/juanloya/Documents/SwimmingModelPython/swim_v2/data_modified_users'
 
 # Path to where we want to save the training results
-run_name = 'tune_swim_stroke_100_weighted'
+run_name = 'stroke_lstm_1_weighted'
 base_path = '/Users/juanloya/Documents/SwimmingModelPython/swim_v2'
 save_path = os.path.join(base_path, f'run_{run_name}')
 
@@ -28,11 +41,11 @@ users = [u for u in users_all] #if u not in users_ignore]
 users.sort(key=int)
 
 # Keeping it simple. Comment this out and use the code above if you want to load everybody
-#users = ['2','6','7','11']
-#users_test = users
+users = ['2','6','7','11']
+users_test = users
 
 # List of users we want to train a model for
-users_test = ['7']
+#users_test = ['2','6','7','11']
 
 # Hyper-parameters for loading data.
 data_parameters = {'users':                users,   # Users whose data is loaded
@@ -58,6 +71,7 @@ data_parameters = {'users':                users,   # Users whose data is loaded
                         2: 1,  # Breaststroke
                         3: 1,  # Backstroke
                         4: 1,  # Butterfly
+                  #      'stroke_labels': ['stroke_labels'],  # Track stroke labels separately
                    },
                    'debug':               False,
                    'debug_plot':           False
@@ -122,26 +136,28 @@ swim_model_parameters = {
 Get parameters for stroke detection branch
 """
 stroke_model_parameters = {
-    'filters':        [64, 64],  # First conv, attention conv
+    'filters':        [64, 64],  # First attention,  conv
     'kernel_sizes':   [1, 3],    # 1x1 for attention, 3x1 for conv
     'strides':        [None, None],
     'max_pooling':    [None, None],
     'units':          [32],      # LSTM units
-    'activation':     ['elu', 'sigmoid', 'sigmoid'],  # conv, attention, output
-    'batch_norm':     [False, False, False],
-    'drop_out':       [0.3, 0.3, 0.5],  # Adjusted dropout rates
+    'activation':     ['sigmoid', 'tanh', 'sigmoid'],  # conv, attention, output
+    'batch_norm':     [True, True, False],
+    'drop_out':       [0.3, 0.3, 0.2],  # Adjusted dropout rates
     'max_norm':       [0.5, 0.5, 4.0],  # Reduced max norm constraints
-
     'l2_reg':         [1e-4, 1e-4, 1e-4],  # Add light L2 regularization
     'labels':         ['stroke_labels']     # binary stroke detection
 }
+
+#swim_model_parameters = cnn_vanilla_dual2.get_default_swim_model_parameters()
+#stroke_model_parameters = cnn_vanilla_dual2.get_default_stroke_model_parameters()
 
 # Parameters for training the CNN model
 training_parameters = {'swim_style_lr': 0.0005,  # Constant for swim style
                        'stroke_lr': {
                             'initial_lr': 0.0001,
                             'decay_steps': 1000,
-                            'decay_rate': 0.90
+                            'decay_rate': 0.9
                         },
                        'beta_1':          0.9,
                        'beta_2':          0.999,
@@ -149,22 +165,22 @@ training_parameters = {'swim_style_lr': 0.0005,  # Constant for swim style
                        'max_epochs':      100,      # Keeping small for quick testing
                        'steps_per_epoch': 100,      # Keeping small for quick testing
                        'noise_std':       0.01,    # Noise standard deviation for data augmentation
-                       'mirror_prob':     0.5,     # Probability of reversing a window for data augmentation, set to None for stroke
+                       'mirror_prob':     None,     # Probability of reversing a window for data augmentation
                        'random_rot_deg':  30,      # [-30, 30] is the range of rotation degrees we sample for each
                                                    # window in the mini-batch
                        'group_probs':     {'original': 0.7, 'time_scaled_0.9': 0.15, 'time_scaled_1.1': 0.15},
                        'sample_weights':   'sklearn',    # Sample weights for validation set, 'sklearn' or 'inverse_freq'
-                       'stroke_mask':     False,    # Whether to use a mask for stroke labels
+                       'stroke_mask':     True,    # Whether to use a mask for stroke labels
                        'labels':          swimming_data.labels,
                        'stroke_labels':   swimming_data.stroke_labels,
                        'stroke_label_output':       True,
-                       'swim_style_output':         True,
-                       'ouput_bias':                None
+                       'swim_style_output':         False,
+                       'output_bias':               None
                        }
 
 # The input shape of the CNN
 #input_shape = (data_parameters['win_len'], len(data_parameters['data_columns']) + len(data_parameters['stroke_labels']), 1)
-input_shape = (data_parameters['win_len'], len(data_parameters['data_columns']), 1)
+input_shape = (data_parameters['win_len'], len(data_parameters['data_columns']))
 
 
 # Train all models
@@ -189,22 +205,12 @@ for (i, user_test) in enumerate(users_test):
 
     # Users whose data we use for training
     users_train = [u for u in users if u != user_test]
-    
-    # Manually-defined val_dict for hyperparameter tuning
-    val_dict = {
-        0: ['28'],  # Transition (challenging)
-        1: ['15', '18', '12'],  # Crawl (easy and challenging)
-        2: ['28', '39', '32'],  # Breaststroke (easy and challenging)
-        3: ['21','22', '35'],  # Backstroke (easy)
-        4: ['17', '32']  # Butterfly (challenging)
-    }
-    
+
     # Draw users for each class. train_dict and val_dict are dictionaries whose keys are labels and they contain
     # lists of names for each label
     train_dict, val_dict = swimming_data.draw_train_val_dicts(users_train,
-                                                              users_per_class=data_parameters['validation_set'],     
-                                                              manual_val_dict=val_dict  # Pass the manually-defined val_dict
-    )
+                                                              users_per_class=data_parameters['validation_set'],
+                                                              manual_val_dict=None)
     if data_parameters['debug']:
         print("Training dictionary: %s" % train_dict)   
         print("Validation dictionary: %s" % val_dict)
@@ -217,7 +223,7 @@ for (i, user_test) in enumerate(users_test):
         data_type="training",
         exclude_label=None
     )
-    training_parameters['ouput_bias'] = training_bias
+    training_parameters['output_bias'] = training_bias
     # Calculate stroke label distribution for validation set (excluding label 0)
     validation_probabilities, validation_mean, validation_bias, validation_class_weights = utils.calculate_stroke_label_distribution(
         label_user_dict=val_dict,
@@ -240,7 +246,7 @@ for (i, user_test) in enumerate(users_test):
                                               noise_std=training_parameters['noise_std'],
                                               mirror_prob=training_parameters['mirror_prob'],
                                               random_rot_deg=training_parameters['random_rot_deg'],
-                                              use_4D=True,
+                                              use_4D=False,
                                               swim_style_output=training_parameters['swim_style_output'], 
                                               stroke_label_output=training_parameters['stroke_label_output'],
                                               return_stroke_mask=training_parameters['stroke_mask'])
@@ -333,10 +339,20 @@ for (i, user_test) in enumerate(users_test):
     val_stroke_weights = utils.create_balanced_sampler(y_stroke_val, method='sklearn')
     print(f"Sample weights: {val_stroke_weights}")
     # Adjust val_sample_weights shape to match val_stroke_weights for broadcasting
-    combined_weights = val_sample_weights[:, np.newaxis, np.newaxis] * val_stroke_weights
-    x_val = x_val.reshape((x_val.shape[0], x_val.shape[1], x_val.shape[2], 1))
 
-    #callbacks = utils_train.get_callbacks(experiment_save_path, user_test, log_dir)
+    combined_weights = val_sample_weights[:, np.newaxis, np.newaxis] * val_stroke_weights
+
+   # x_val = x_val.reshape((x_val.shape[0], x_val.shape[1], x_val.shape[2], 1))
+
+    callbacks = utils_train.get_callbacks(experiment_save_path, user_test, log_dir)
+    # The cnn_vanilla module contains contains everything to generate the CNN model
+    model = lstm_dual.create_bilstm_model(input_shape, swim_model_parameters, stroke_model_parameters, use_seed=True, training_parameters=training_parameters)
+
+    model.summary()
+
+    model = utils_train.compile_model(data_parameters, model, training_parameters, class_weights=weights)
+
+
 
     # Print validation data shapes
     if data_parameters['debug']:
@@ -368,51 +384,38 @@ for (i, user_test) in enumerate(users_test):
         validation_data = (x_val, {'swim_style_output': y_val_cat, 'stroke_label_output': y_stroke_val},
                                 {'swim_style_output': val_sample_weights, 'stroke_label_output': (val_stroke_mask 
                                     if training_parameters['stroke_mask'] 
-                                    else combined_weights)})
-        # Set up the combined early stopping callback
-        callbacks = [utils_train.CombinedEarlyStopping(
-            monitor1='val_weighted_f1_score',
-            monitor2='val_weighted_categorical_accuracy',
-            mode1='max',
-            mode2='max',
-            patience=5,
-            restore_best_weights=True
-        )]
+                                    else val_stroke_weights)})
     elif training_parameters['swim_style_output']:
         validation_data = (x_val, {'swim_style_output': y_val_cat},
                         {'swim_style_output': val_sample_weights})
-        callbacks=[tf.keras.callbacks.EarlyStopping(monitor='val_weighted_categorical_accuracy', patience=10, restore_best_weights=True, mode='max')]
     else:
         validation_data = (x_val, {'stroke_label_output': y_stroke_val},
                             {'stroke_label_output': (val_stroke_mask 
                                                 if training_parameters['stroke_mask'] 
                                                 else combined_weights)})
-        callbacks=[tf.keras.callbacks.EarlyStopping(monitor='val_weighted_f1_score', patience=10, restore_best_weights=True, mode='max')]
     
-
         # Pass to model.fit
-    best_model = tune_cnn.run_hyperparameter_tuning(
-        input_shape, 
-        data_parameters, 
-        training_parameters,
-        class_weights=None,
-        gen=gen,  
+    history = model.fit(
+        gen,  
         validation_data=validation_data,
-        experiment_save_path=experiment_save_path,
-        callbacks=callbacks
-
+        epochs=training_parameters['max_epochs'],
+        steps_per_epoch=training_parameters['steps_per_epoch'],
+        validation_batch_size=training_parameters['batch_size'],
+        callbacks=callbacks,
+        verbose=1
     )
-    best_model.summary()
-    
+
     # Save model in h5 format
     model_h5_path = os.path.join(experiment_save_path, f'model_{user_test}.h5')
-    best_model.save(model_h5_path)
+    model.save(model_h5_path)
     # Save model in native Keras format
     model_keras_path = os.path.join(experiment_save_path, f'model_{user_test}.keras')
-    best_model.save(model_keras_path)
+    model.save(model_keras_path)
     # Saving the history and parameters
     with open(os.path.join(experiment_save_path, 'train_val_dicts.pkl'), 'wb') as f:
         pickle.dump([train_dict, val_dict], f)
+    with open(os.path.join(experiment_save_path, 'history.pkl'), 'wb') as f:
+        pickle.dump([history.history], f)
     with open(os.path.join(experiment_save_path, 'data_parameters.pkl'), 'wb') as f:
         pickle.dump([data_parameters], f)
     with open(os.path.join(experiment_save_path, 'swim_model_parameters.pkl'), 'wb') as f:

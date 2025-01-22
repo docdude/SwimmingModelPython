@@ -61,8 +61,9 @@ def get_default_training_parameters():
                         'group_probs':     {'original': 0.7, 'time_scaled_0.9': 0.15, 'time_scaled_1.1': 0.15},
                         'labels':          [0, 1, 2, 3, 4],
                         'stroke_labels': ['stroke_labels'],  # Labels for stroke predictions
-                        'stroke_label_output':     True,
-                        'swim_style_output':      False
+                        'stroke_label_output':      True,
+                        'swim_style_output':        False,
+                        'output_bias':              None
                         }
     return training_parameters
 
@@ -304,27 +305,52 @@ def stroke_model(inputs, stroke_model_parameters, use_seed=True, output_bias=Non
     )(stroke_branch)
 
     return stroke_label_output
-
-def cnn_model(input_shape, swim_model_parameters, stroke_model_parameters, training_parameters, use_seed=True, output_bias=None):
+"""
+def cnn_model(input_shape, swim_model_parameters, stroke_model_parameters, training_parameters, use_seed=True):
     inputs = tf.keras.Input(shape=input_shape)
     if training_parameters['swim_style_output'] and training_parameters['stroke_label_output']:
-        swim_style_output = swim_style_model(inputs, swim_model_parameters, use_seed, output_bias)
-        stroke_label_output = stroke_model(inputs, stroke_model_parameters, use_seed, output_bias) 
+        swim_style_output = swim_style_model(inputs, swim_model_parameters, use_seed, output_bias=None)
+        stroke_label_output = stroke_model(inputs, stroke_model_parameters, use_seed, output_bias=training_parameters['output_bias']) 
         # Create Model
         model = tf.keras.Model(inputs=inputs, outputs=[swim_style_output, stroke_label_output])
 
     elif training_parameters['swim_style_output']:
-        swim_style_output = swim_style_model(inputs, swim_model_parameters, use_seed, output_bias)
+        swim_style_output = swim_style_model(inputs, swim_model_parameters, use_seed, output_bias=None)
         # Create Model
         model = tf.keras.Model(inputs=inputs, outputs=[swim_style_output])
 
     else:
-        stroke_label_output = stroke_model(inputs, stroke_model_parameters, use_seed, output_bias)
+        stroke_label_output = stroke_model(inputs, stroke_model_parameters, use_seed, output_bias=training_parameters['output_bias'])
         # Create Model
         model = tf.keras.Model(inputs=inputs, outputs=[stroke_label_output])
 
     return model
+"""
+def cnn_model(input_shape, swim_model_parameters=None, stroke_model_parameters=None, training_parameters=None):
 
+    inputs = tf.keras.Input(shape=input_shape)
+
+    # Build swim style branch if swim_model_parameters are provided
+    swim_style_output = None
+    if swim_model_parameters is not None and training_parameters['swim_style_output']:
+        swim_style_output = swim_style_model(inputs, swim_model_parameters, output_bias=None)
+
+    # Build stroke branch if stroke_model_parameters are provided
+    stroke_label_output = None
+    if stroke_model_parameters is not None and training_parameters['stroke_label_output']:
+        stroke_label_output = stroke_model(inputs, stroke_model_parameters, output_bias=training_parameters['output_bias'])
+
+    # Combine outputs based on the branches enabled
+    if swim_style_output is not None and stroke_label_output is not None:
+        model = tf.keras.Model(inputs=inputs, outputs=[swim_style_output, stroke_label_output])
+    elif swim_style_output is not None:
+        model = tf.keras.Model(inputs=inputs, outputs=swim_style_output)
+    elif stroke_label_output is not None:
+        model = tf.keras.Model(inputs=inputs, outputs=stroke_label_output)
+    else:
+        raise ValueError("No outputs selected for the model.")
+
+    return model
 
 def main():
     input_shape = (180, 6, 1) # Load sensor data, accel, gyro, stroke_labels

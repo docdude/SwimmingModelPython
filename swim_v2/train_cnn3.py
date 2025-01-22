@@ -172,8 +172,9 @@ training_parameters = {'swim_style_lr': 0.0005,  # Constant for swim style
                        'stroke_mask':     True,    # Whether to use a mask for stroke labels
                        'labels':          swimming_data.labels,
                        'stroke_labels':   swimming_data.stroke_labels,
-                       'stroke_label_output':     True,
-                       'swim_style_output':      False
+                       'stroke_label_output':       True,
+                       'swim_style_output':         False,
+                       'output_bias':               None
                        }
 
 # The input shape of the CNN
@@ -221,7 +222,7 @@ for (i, user_test) in enumerate(users_test):
         data_type="training",
         exclude_label=None
     )
-
+    training_parameters['output_bias'] = training_bias
     # Calculate stroke label distribution for validation set (excluding label 0)
     validation_probabilities, validation_mean, validation_bias, validation_class_weights = utils.calculate_stroke_label_distribution(
         label_user_dict=val_dict,
