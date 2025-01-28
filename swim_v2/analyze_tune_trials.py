@@ -9,6 +9,7 @@ import numpy as np
 import pickle
 from tqdm import tqdm
 import shutil
+import json
 
 def parse_tensorboard_logs_for_validation(log_base_dir, metric_name):
     """
@@ -132,7 +133,7 @@ def parse_plugin_data(plugin_data_content):
         # Parse the plugin data content as HParamsConfig protobuf
         hparams_plugin_data = plugin_data_pb2.HParamsPluginData()
         hparams_plugin_data.ParseFromString(plugin_data_content)
-        print("Parsed Experiment Message (JSON):", MessageToJson(hparams_plugin_data))
+        #print("Parsed Experiment Message (JSON):", MessageToJson(hparams_plugin_data))
 
         # Convert the protobuf message to a dictionary
         parsed_dict = MessageToDict(hparams_plugin_data, preserving_proto_field_name=True)
@@ -145,7 +146,7 @@ def parse_plugin_data(plugin_data_content):
 def extract_hparams_and_group(parsed_dict):
     try:
         return {
-            'group_name': parsed_dict.get('session_start_info', {}).get('group_name', ''),
+            'Trial': parsed_dict.get('session_start_info', {}).get('group_name', ''),
             'hparams': parsed_dict.get('session_start_info', {}).get('hparams', {})
 
         }
@@ -190,10 +191,17 @@ def save_top_trials(top_trials, save_path):
     if os.path.exists(save_path):
         shutil.rmtree(save_path)
     os.makedirs(save_path)  # Creates all parent directories if they don't exist
+    # Save hyperparameters for each rank
+    for rank, (trial, score, stats, hparams_data) in enumerate(top_trials, start=1):
+        # Create filename for each rank
+        hparams = hparams_data.get('hparams', {})
+        filename = f'best_hyperparameters_{rank}.pkl'
+        with open(os.path.join(save_path, filename), 'wb') as f:        
+            pickle.dump(hparams, f)
 
     with open(os.path.join(save_path, 'top_trials.pkl'), 'wb') as f:
         pickle.dump(top_trials, f)
-    print(f"Top trials saved to {save_path}")
+    print(f"Top trials and hyperparameters saved to {save_path}")
 
 
 def main(log_dir, metric_name="epoch_weighted_f1_score", top_n=5, last_n_epochs=15, save_path="top_trials.pkl"):
@@ -218,14 +226,15 @@ def main(log_dir, metric_name="epoch_weighted_f1_score", top_n=5, last_n_epochs=
         print(f"  Std {metric_name}: {stats['std_f1']:.4f}")
         print(f"  Peak {metric_name}: {stats['peak_f1']:.4f}")
         print(f"  Custom Score: {score:.4f}")
-        print(f"  Hyperparameters: {hyperparams}")
+        print(f"  Hyperparameters (JSON):", json.dumps(hyperparams, indent=4))
 
     print(f"Saving the top {top_n} trials...")
     save_top_trials(top_trials, save_path)
 
 
 if __name__ == "__main__":
-    run_name = "tune_stroke_lstm"
+    run_name = "tune_swim_lstm2"
+    metric_name = "epoch_weighted_categorical_accuracy"
     save_path = f'/Users/juanloya/Documents/SwimmingModelPython/swim_v2/best_hyperparameters/{run_name}'
     log_base_dir = f'/Users/juanloya/Documents/SwimmingModelPython/swim_v2/logs/{run_name}'
-    main(log_base_dir, metric_name="epoch_weighted_f1_score", top_n=5, last_n_epochs=15, save_path=save_path)
+    main(log_base_dir, metric_name=metric_name, top_n=5, last_n_epochs=15, save_path=save_path)

@@ -30,7 +30,7 @@ def get_default_training_parameters():
                         'labels':          [0, 1, 2, 3, 4],
                         'stroke_labels': ['stroke_labels'],  # Labels for stroke predictions
                         'stroke_label_output':      True,
-                        'swim_style_output':        False,
+                        'swim_style_output':        True,
                         'output_bias':              None
                         }
     return training_parameters
@@ -38,7 +38,7 @@ def get_default_training_parameters():
 def create_swim_model_parameters(hp):
     return {
         'units': [hp.Int(f'swim_dense_units_{i}', min_value=32, max_value=256, step=32) for i in range(1)],
-        'activation': [hp.Choice(f'swim_activation_{i}', values=['relu', 'elu', 'leaky_relu']) for i in range(1)],  # Tunable activation for Conv2D layers
+        'activation': [hp.Choice(f'swim_activation_{i}', values=['relu', 'elu', 'leaky_relu']) for i in range(1)],  # Tunable activation for Dense layers
         'batch_norm': [hp.Boolean(f'swim_batch_norm_{i}') for i in range(1)],
         'drop_out': [hp.Float(f'swim_dropout_{i}', min_value=0.0, max_value=0.5, step=0.1) for i in range(1)],
         'max_norm': [hp.Choice(f'swim_max_norm_{i}', values=[0.0, 0.1, 0.5, 1.0, 4.0]) for i in range(1)],
@@ -61,7 +61,7 @@ def create_common_model_parameters(hp):
         'lstm_recurrent_dropout': [hp.Float(f'common_lstm_recurrent_dropout_{i}', min_value=0.0, max_value=0.5, step=0.1) for i in range(num_lstm_layers)],  # LSTM recurrent dropout
         'lstm_l2_reg': [hp.Choice(f'common_lstm_l2_reg_{i}', values=[0.0, 1e-4, 1e-3]) for i in range(num_lstm_layers)],  # L2 regularization for LSTM
         'lstm_max_norm': [hp.Choice(f'common_lstm_max_norm_{i}', values=[0.0, 0.1, 0.5, 1.0, 4.0]) for i in range(num_lstm_layers)],  # Max norm for LSTM
-        'activation': [hp.Choice(f'common_activation_{i}', values=['relu', 'elu', 'leaky_relu', 'tanh']) for i in range(num_lstm_layers)],  # Tunable activation for LSTM layer
+        'activation': [hp.Choice(f'common_activation_{i}', values=['relu', 'tanh']) for i in range(num_lstm_layers)],  # Tunable activation for LSTM layer
 
     }
 
@@ -169,6 +169,8 @@ def swim_style_model(common_model=None, swim_model_parameters=None, use_seed=Tru
 
     swim_branch = common_model
 
+    swim_branch = tf.keras.layers.GlobalAveragePooling1D(name="swim_style_global_pooling")(swim_branch)
+
     kernel_constraint = (
         tf.keras.constraints.max_norm(swim_model_parameters['max_norm'][0])
         if swim_model_parameters['max_norm'][0] != 0
@@ -253,12 +255,12 @@ def create_bilstm_model(input_shape, common_model_parameters=None, swim_model_pa
     # Build swim style branch if swim_model_parameters are provided
     swim_style_output = None
     if swim_model_parameters is not None and training_parameters['swim_style_output']:
-        swim_style_output = swim_style_model(common_model, swim_model_parameters, use_seed, output_bias=None)
+        swim_style_output = swim_style_model(common_model, swim_model_parameters, use_seed=True, output_bias=None)
 
     # Build stroke branch if stroke_model_parameters are provided
     stroke_label_output = None
     if stroke_model_parameters is not None and training_parameters['stroke_label_output']:
-        stroke_label_output = stroke_model(common_model, stroke_model_parameters, use_seed, output_bias=training_parameters['output_bias'])
+        stroke_label_output = stroke_model(common_model, stroke_model_parameters, use_seed=True, output_bias=training_parameters['output_bias'])
 
     # Combine outputs based on the branches enabled
     if swim_style_output is not None and stroke_label_output is not None:
@@ -269,7 +271,7 @@ def create_bilstm_model(input_shape, common_model_parameters=None, swim_model_pa
         model = tf.keras.Model(inputs=inputs, outputs=stroke_label_output)
     else:
         raise ValueError("No outputs selected for the model.")
-
+    model.summary()
     return model
 
 class DebugCallback(tf.keras.callbacks.Callback):
@@ -300,8 +302,8 @@ def combined_metric(logs, alpha=0.5):
     :param alpha: Weight for the first metric (0 ≤ alpha ≤ 1). The second metric weight will be 1 - alpha.
     :return: Combined metric value.
     """
-    metric1 = logs.get('val_weighted_f1_score', 0.0)  # Stroke branch
-    metric2 = logs.get('val_weighted_categorical_accuracy', 0.0)  # Swim style branch
+    metric1 = logs.get('val_stroke_label_output_weighted_f1_score', 0.0)  # Stroke branch
+    metric2 = logs.get('val_swim_style_output_weighted_categorical_accuracy', 0.0)  # Swim style branch
     
     # Avoid division by zero
     if metric1 == 0 or metric2 == 0:
@@ -311,8 +313,17 @@ def combined_metric(logs, alpha=0.5):
     harmonic_mean = 2 / ((alpha / metric1) + ((1 - alpha) / metric2))
     return harmonic_mean
 
+class CombinedMetricCallback(tf.keras.callbacks.Callback):
+    def __init__(self, alpha=0.5):
+        self.alpha = alpha
 
-def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters, class_weights, gen, validation_data, experiment_save_path="", callbacks=None):
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        combined = combined_metric(logs, alpha=self.alpha)
+        logs['val_combined_metric'] = combined
+        print(f"Epoch {epoch + 1}: val_combined_metric = {combined:.4f}")
+
+def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters, class_weights, gen, validation_data, experiment_save_path="debug", callbacks=None):
     # Create the hypermodel
     hypermodel = SwimStrokeHyperModel(input_shape, training_parameters, class_weights, data_parameters)
 
@@ -322,12 +333,7 @@ def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters,
         return None  # Skip this trial
     
     if training_parameters['swim_style_output'] and training_parameters['stroke_label_output']:
-        # Define the combined objective
-        def combined_logs(logs):
-            alpha = 0.5  # Weight for stroke branch
-            return combined_metric(logs, alpha)
-        objective = kt.Objective(lambda logs: combined_logs(logs), direction='max')
-
+        objective = kt.Objective('val_combined_metric', direction='max')
     elif training_parameters['swim_style_output']:
         objective=kt.Objective('val_weighted_categorical_accuracy', direction='max')
     else:
@@ -341,7 +347,7 @@ def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters,
         objective=objective,
         max_trials=100,  # Number of trials (adjust based on resources)
         num_initial_points=20,  # Number of random points to start the search
-        directory='hyperparameter_tuning_stroke_lstm',
+        directory=f'hyperparameter_{experiment_save_path}',
         project_name='swim_stroke_model',
         max_consecutive_failed_trials=10 # Increase max_failures
 
@@ -349,7 +355,7 @@ def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters,
 
            
     # Set up TensorBoard callback
-    log_dir = f"logs/tune_stroke_lstm/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    log_dir = f"logs/{experiment_save_path}/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
     tensorboard_callback = get_tensorboard_callback(log_dir)
 
     # Add TensorBoard callback to the list of callbacks
@@ -357,7 +363,7 @@ def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters,
         callbacks = []
     callbacks.append(tensorboard_callback)
     # Add debugging callback
-    #callbacks.append(DebugCallback())
+    callbacks.append(DebugCallback())
     # Start the search
 
     tuner.search(
@@ -417,8 +423,8 @@ if __name__ == '__main__':
                 )
         # Set up the combined early stopping callback
         callbacks = [CombinedEarlyStopping(
-            monitor1='val_weighted_f1_score',
-            monitor2='val_weighted_categorical_accuracy',
+            monitor1='val_stroke_label_output_weighted_f1_score',
+            monitor2='val_swim_style_ouput_weighted_categorical_accuracy',
             mode1='max',
             mode2='max',
             patience=5,
@@ -433,6 +439,7 @@ if __name__ == '__main__':
             while True:
                 yield ([tf.random.normal((64, 180, 6)), 
                         tf.random.uniform((64, 5), minval=0, maxval=4, dtype=tf.int32)])
+
         callbacks=[tf.keras.callbacks.EarlyStopping(monitor='val_weighted_categorical_accuracy', patience=10, restore_best_weights=True, mode='max')]
     else:  # Only stroke label output
         def gen():

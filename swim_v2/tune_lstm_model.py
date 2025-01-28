@@ -12,12 +12,13 @@ import pickle
 import datetime
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.utils.class_weight import compute_sample_weight
+from utils_train import CombinedEarlyStopping, CombinedMetricCallback
 
 # A path to re-sampled recordings which are organized into folders by user name.
 data_path = '/Users/juanloya/Documents/SwimmingModelPython/swim_v2/data_modified_users'
 
 # Path to where we want to save the training results
-run_name = 'tune_stroke_lstm_weighted'
+run_name = 'tune_swim_stroke_lstm2_weighted'
 base_path = '/Users/juanloya/Documents/SwimmingModelPython/swim_v2'
 save_path = os.path.join(base_path, f'run_{run_name}')
 
@@ -48,7 +49,7 @@ data_parameters = {'users':                users,   # Users whose data is loaded
                    'stroke_range':         6,       # Augments stroke labels in the dataset to include a range around detected peaks
                    'win_len':              180,     # The length of the segmentation window in number of samples
                    'slide_len':            30,      # The slide length used for segmentation
-                   'window_normalization': 'statistical',   # How we want to normalize the windows. Statistical means
+                   'window_normalization': 'tanh_scaled',   # How we want to normalize the windows. Statistical means
                                                             # zero-mean and unit variance for each signal
                    'label_type':           'majority',  # How we label windows.
                    'majority_thresh':      0.75,    # Proportion of samples in a window that have to have the same label
@@ -158,7 +159,7 @@ training_parameters = {'swim_style_lr': 0.0005,  # Constant for swim style
                        'labels':          swimming_data.labels,
                        'stroke_labels':   swimming_data.stroke_labels,
                        'stroke_label_output':       True,
-                       'swim_style_output':         False,
+                       'swim_style_output':         True,
                        'output_bias':                None
                        }
 
@@ -365,23 +366,22 @@ for (i, user_test) in enumerate(users_test):
                                     if training_parameters['stroke_mask'] 
                                     else combined_weights)})
         # Set up the combined early stopping callback
-        callbacks = [utils_train.CombinedEarlyStopping(
-            monitor1='val_weighted_f1_score',
-            monitor2='val_weighted_categorical_accuracy',
-            mode1='max',
-            mode2='max',
-            patience=5,
-            restore_best_weights=True
-        )]
+        callbacks = [
+            CombinedMetricCallback(alpha=0.5),
+            CombinedEarlyStopping(
+                monitor1='val_stroke_label_output_weighted_f1_score',
+                monitor2='val_swim_style_output_weighted_categorical_accuracy',
+                mode1='max',
+                mode2='max',
+                patience=5,
+                restore_best_weights=True
+            )
+        ]
     elif training_parameters['swim_style_output']:
-        validation_data = (x_val, {'swim_style_output': y_val_cat},
-                        {'swim_style_output': val_sample_weights})
+        validation_data = (x_val, y_val_cat, val_sample_weights)
         callbacks=[tf.keras.callbacks.EarlyStopping(monitor='val_weighted_categorical_accuracy', patience=10, restore_best_weights=True, mode='max')]
     else:
-        validation_data = (x_val, {'stroke_label_output': y_stroke_val},
-                            {'stroke_label_output': (val_stroke_mask 
-                                                if training_parameters['stroke_mask'] 
-                                                else combined_weights)})
+        validation_data = (x_val,  y_stroke_val, (val_stroke_mask if training_parameters['stroke_mask'] else combined_weights))
         callbacks=[tf.keras.callbacks.EarlyStopping(monitor='val_weighted_f1_score', patience=10, restore_best_weights=True, mode='max')]
     
 
@@ -393,7 +393,7 @@ for (i, user_test) in enumerate(users_test):
         class_weights=None,
         gen=gen,  
         validation_data=validation_data,
-        experiment_save_path=experiment_save_path,
+        experiment_save_path=run_name,
         callbacks=callbacks
 
     )

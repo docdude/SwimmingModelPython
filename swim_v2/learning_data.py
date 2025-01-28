@@ -554,20 +554,16 @@ class LearningData(object):
                         )
                 elif swim_style_output:
                     yield (
-                        batch_data,
-                        {'swim_style_output': batch_labels}
+                        batch_data, batch_labels
                     )
                 else:
                     if return_stroke_mask:
                         yield (
-                            batch_data,
-                            {'stroke_label_output': batch_stroke_labels},
-                            {'stroke_label_output': stroke_mask}
+                            batch_data, batch_stroke_labels, stroke_mask
                         )
                     else:
                         yield (
-                            batch_data,
-                            {'stroke_label_output': batch_stroke_labels}
+                            batch_data,batch_stroke_labels
                         )
             else:  # Categorical labels
                 if swim_style_output and stroke_label_output:
@@ -592,20 +588,16 @@ class LearningData(object):
                         )
                 elif swim_style_output:
                     yield (
-                        batch_data,
-                        {'swim_style_output': batch_labels_cat}
+                        batch_data, batch_labels_cat
                     )
                 else:
                     if return_stroke_mask:
                         yield (
-                            batch_data,
-                            {'stroke_label_output': batch_stroke_labels},
-                            {'stroke_label_output': stroke_mask}
+                            batch_data, batch_stroke_labels, stroke_mask
                         )
                     else:
                         yield (
-                            batch_data,
-                            {'stroke_label_output': batch_stroke_labels}
+                            batch_data, batch_stroke_labels
                         )
 
 

@@ -291,7 +291,36 @@ class F1ScoreMultiClass(tf.keras.metrics.Metric):
             "num_classes": self.num_classes
         })
         return config
+
+def combined_metric(logs, alpha=0.5):
+    """
+    Combine two metrics with a weighted harmonic mean.
     
+    :param logs: Dictionary containing logged metrics (e.g., logs from callbacks).
+    :param alpha: Weight for the first metric (0 ≤ alpha ≤ 1). The second metric weight will be 1 - alpha.
+    :return: Combined metric value.
+    """
+    metric1 = logs.get('val_stroke_label_output_weighted_f1_score', 0.0)  # Stroke branch
+    metric2 = logs.get('val_swim_style_output_weighted_categorical_accuracy', 0.0)  # Swim style branch
+    
+    # Avoid division by zero
+    if metric1 == 0 or metric2 == 0:
+        return 0.0
+    
+    # Calculate the weighted harmonic mean
+    harmonic_mean = 2 / ((alpha / metric1) + ((1 - alpha) / metric2))
+    return harmonic_mean
+
+class CombinedMetricCallback(tf.keras.callbacks.Callback):
+    def __init__(self, alpha=0.5):
+        self.alpha = alpha
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        combined = combined_metric(logs, alpha=self.alpha)
+        logs['val_combined_metric'] = combined
+        print(f"Epoch {epoch + 1}: val_combined_metric = {combined:.4f}")
+           
 class CombinedEarlyStopping(tf.keras.callbacks.Callback):
     def __init__(self, monitor1, monitor2, mode1='max', mode2='max', patience=5, restore_best_weights=True):
         super(CombinedEarlyStopping, self).__init__()
@@ -457,8 +486,10 @@ def compile_model(data_parameters, model, training_parameters, class_weights=Non
         # Get layers for each branch
         swim_style_layers = [layer for layer in model.layers 
                             if 'swim_style' in layer.name]
-        stroke_layers = [layer for layer in model.layers 
-                        if 'stroke' in layer.name]
+        stroke_layers     = [layer for layer in model.layers 
+                            if 'stroke' in layer.name]
+        common_layers     = [layer for layer in model.layers
+                            if 'bilstm' in layer.name]
          # Debug print
         if data_parameters['debug']:
             print("\nSwim Style Layers:")
@@ -467,6 +498,10 @@ def compile_model(data_parameters, model, training_parameters, class_weights=Non
         
             print("\nStroke Layers:")
             for layer in stroke_layers:
+                print(f"  {layer.name, layer.trainable}")
+
+            print("\nCommon Layers:")
+            for layer in common_layers:
                 print(f"  {layer.name, layer.trainable}")
 
         # Create optimizers with explicit learning rates
@@ -497,7 +532,7 @@ def compile_model(data_parameters, model, training_parameters, class_weights=Non
   #          (swim_style_optimizer, swim_style_layers),
    #         (stroke_optimizer, stroke_layers)
     #    ])
-        optimizers_and_layers = [(swim_style_optimizer, swim_style_layers), (stroke_optimizer, stroke_layers)]
+        optimizers_and_layers = [(swim_style_optimizer, common_layers + swim_style_layers), (stroke_optimizer, common_layers + stroke_layers)]
         optimizer = tfa.optimizers.MultiOptimizer(optimizers_and_layers)
         loss={
             'swim_style_output': type_categorical_crossentropy,
@@ -545,7 +580,6 @@ def compile_model(data_parameters, model, training_parameters, class_weights=Non
         metrics = {
             'swim_style_output': [
                 tf.keras.metrics.CategoricalAccuracy(name='categorical_accuracy'),
-                tf.keras.metrics.TopKCategoricalAccuracy(k=1, name='top_1_accuracy'),
                 tf.keras.metrics.CategoricalCrossentropy(name='cross_entropy'),
                 tf.keras.metrics.Precision(name='precision'),
                 tf.keras.metrics.Recall(name='recall')
@@ -554,7 +588,6 @@ def compile_model(data_parameters, model, training_parameters, class_weights=Non
         weighted_metrics = {
             'swim_style_output': [
                 tf.keras.metrics.CategoricalAccuracy(name='weighted_categorical_accuracy'),
-                tf.keras.metrics.TopKCategoricalAccuracy(k=1, name='weighted_top_1_accuracy'),
                 tf.keras.metrics.Precision(name='weighted_precision'),
                 tf.keras.metrics.Recall(name='weighted_recall')
             ]

@@ -76,6 +76,9 @@ def swim_style_model(common_model=None, use_seed=True, output_bias=None):
     if output_bias is not None:
         output_bias = tf.keras.initializers.Constant(output_bias)
     swim_branch = common_model
+    
+    swim_branch = tf.keras.layers.GlobalAveragePooling1D(name="swim_style_global_pooling")(swim_branch)
+
     swim_branch = tf.keras.layers.Dense(
         64,
         activation="relu",
@@ -100,12 +103,6 @@ def stroke_model(common_model=None, use_seed=True, output_bias=None):
         output_bias = tf.keras.initializers.Constant(output_bias)
 
     stroke_branch = common_model
-    # Reshape to (batch, time, features)
- #   temporal_dim = stroke_branch.shape[1]
-  #  stroke_branch = tf.keras.layers.Reshape(
-   #     (temporal_dim, -1),
-    #    name='stroke_reshape'
-   # )(stroke_branch)
 
     stroke_branch = tf.keras.layers.Dropout(0.5, name="stroke_dropout_1")(stroke_branch)
     # Layer normalization
