@@ -1,0 +1,5 @@
+commands = [ "python ac_gan_train.py",]
+optimization_priority = "TIME"
+gpu = "L4"
+cloud = "AWS"
+region = "us-west1"

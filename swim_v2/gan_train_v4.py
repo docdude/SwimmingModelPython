@@ -21,6 +21,9 @@ users_all = utils.folders_in_path(data_path)
 users = [u for u in users_all]  # Load all users
 users.sort(key=int)
 
+# Keeping it simple. Comment this out and use the code above if you want to load everybody
+users = ['2','6','7','11']
+
 # List of users we want to train a model for
 users_test = users
 
@@ -32,6 +35,7 @@ data_parameters = {
     'data_columns': ['ACC_0', 'ACC_1', 'ACC_2', 'GYRO_0', 'GYRO_1', 'GYRO_2'],  # Sensor data columns
     'stroke_labels': ['stroke_labels'],  # Binary stroke labels: 0 for no stroke, 1 for stroke
     'time_scale_factors': [0.9, 1.1],  # Scale timestamps by 10% faster/slower
+    'stroke_range':         6,       # Augments stroke labels in the dataset to include a range around detected peaks
     'win_len': 180,  # Window length in time steps
     'slide_len': 30,  # Slide length for overlapping windows
     'window_normalization': 'tanh_scaled',  # Normalization method for windowed data
@@ -74,6 +78,9 @@ swimming_data.load_data(data_path=data_path,
 # Augment recordings
 swimming_data.augment_recordings(time_scale_factors=data_parameters['time_scale_factors'])
 
+# Augments stroke labels in the dataset to include a range around detected peaks
+swimming_data.augment_stroke_labels(stroke_range=data_parameters['stroke_range'])
+
 # Compute sliding window locations
 swimming_data.sliding_window_locs(win_len=data_parameters['win_len'], slide_len=data_parameters['slide_len'])
 
@@ -93,7 +100,10 @@ gan_training_parameters = {
     'steps_per_epoch': 100,
     'noise_std': 0.01,
     'mirror_prob': 0.5,
-    'random_rot_deg': 30
+    'random_rot_deg': 30,
+    'stroke_mask':     False,    # Whether to use a mask for stroke labels
+    'stroke_label_output':       True,
+    'swim_style_output':         True
 }
 
 # Define GAN components
@@ -115,19 +125,27 @@ train_dict, val_dict = swimming_data.draw_train_val_dicts(users_test, users_per_
 print("Validation dictionary: %s" % val_dict)
 
 # Prepare validation data
-x_val, y_val_cat, val_sample_weights = swimming_data.get_windows_dict(val_dict, return_weights=True)
+#x_val, y_val_cat, val_sample_weights = swimming_data.get_windows_dict(val_dict, return_weights=True)
 """
 try:
     x_val = x_val.reshape((x_val.shape[0], x_val.shape[1], x_val.shape[2], 1))
 except Exception as e:
     print("Failed to reshape x_val:", e)
 """
-# Create training data generator
-gen = swimming_data.batch_generator_dicts_3D(train_dict=train_dict,
-                                          batch_size=gan_training_parameters['batch_size'],
-                                          noise_std=gan_training_parameters['noise_std'],
-                                          mirror_prob=gan_training_parameters['mirror_prob'],
-                                          random_rot_deg=gan_training_parameters['random_rot_deg'])
+# Get the validation data with weights and mask
+x_val, y_val_sparse, y_val_cat, y_stroke_val, val_sample_weights, val_stroke_mask = swimming_data.get_windows_dict(
+    val_dict, return_weights=True, return_mask=True, transition_label=0
+)
+# The generator used to draw mini-batches
+gen = swimming_data.batch_generator_dicts(train_dict=train_dict,
+                                            batch_size=gan_training_parameters['batch_size'],
+                                            noise_std=gan_training_parameters['noise_std'],
+                                            mirror_prob=gan_training_parameters['mirror_prob'],
+                                            random_rot_deg=gan_training_parameters['random_rot_deg'],
+                                            use_4D=False,
+                                            swim_style_output=gan_training_parameters['swim_style_output'], 
+                                            stroke_label_output=gan_training_parameters['stroke_label_output'],
+                                            return_stroke_mask=gan_training_parameters['stroke_mask'])
 
 # TensorBoard setup
 log_dir = os.path.join("logs", "fit", datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
@@ -143,13 +161,13 @@ def train_gan(generator, discriminator, data_generator, epochs, steps_per_epoch,
         
         for step in range(steps_per_epoch):
             # Get a batch of real data - already augmented from generator
-            #real_data, real_labels = next(data_generator)
-            for real_data, label_dict in gen:
+            real_data, label_dict = next(data_generator)
+           # for real_data, label_dict in gen:
                 # Use only the sensor and stroke label data for GAN training
                 # Combine sensor data and stroke labels
-                real_sensor_data = real_data  # This is batch_data
-                real_labels = label_dict['style_output']  # Swim styles
-                real_stroke_labels = label_dict['stroke_output']  # Stroke labels
+            real_sensor_data = real_data  # This is batch_data
+            real_labels = label_dict['swim_style_output']  # Swim styles
+            real_stroke_labels = label_dict['stroke_label_output']  # Stroke labels
             current_batch_size = real_data.shape[0]
             
             # Generate random noise

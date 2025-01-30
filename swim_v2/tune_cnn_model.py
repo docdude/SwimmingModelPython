@@ -12,6 +12,7 @@ import pickle
 import datetime
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.utils.class_weight import compute_sample_weight
+from utils_train import CombinedMetricCallback, CombinedEarlyStopping
 
 # A path to re-sampled recordings which are organized into folders by user name.
 data_path = '/Users/juanloya/Documents/SwimmingModelPython/swim_v2/data_modified_users'
@@ -159,7 +160,7 @@ training_parameters = {'swim_style_lr': 0.0005,  # Constant for swim style
                        'stroke_labels':   swimming_data.stroke_labels,
                        'stroke_label_output':       True,
                        'swim_style_output':         True,
-                       'ouput_bias':                None
+                       'output_bias':                None
                        }
 
 # The input shape of the CNN
@@ -370,14 +371,17 @@ for (i, user_test) in enumerate(users_test):
                                     if training_parameters['stroke_mask'] 
                                     else combined_weights)})
         # Set up the combined early stopping callback
-        callbacks = [utils_train.CombinedEarlyStopping(
-            monitor1='val_weighted_f1_score',
-            monitor2='val_weighted_categorical_accuracy',
-            mode1='max',
-            mode2='max',
-            patience=5,
-            restore_best_weights=True
-        )]
+        callbacks = [
+            CombinedMetricCallback(alpha=0.5),
+            CombinedEarlyStopping(
+                monitor1='val_stroke_label_output_weighted_f1_score',
+                monitor2='val_swim_style_output_weighted_categorical_accuracy',
+                mode1='max',
+                mode2='max',
+                patience=10,
+                restore_best_weights=True
+            )
+        ]
     elif training_parameters['swim_style_output']:
         validation_data = (x_val, {'swim_style_output': y_val_cat},
                         {'swim_style_output': val_sample_weights})
@@ -391,14 +395,14 @@ for (i, user_test) in enumerate(users_test):
     
 
         # Pass to model.fit
-    best_model = tune_cnn.run_hyperparameter_tuning(
+    best_model, best_hps = tune_cnn.run_hyperparameter_tuning(
         input_shape, 
         data_parameters, 
         training_parameters,
         class_weights=None,
         gen=gen,  
         validation_data=validation_data,
-        experiment_save_path=experiment_save_path,
+        run_name=run_name,
         callbacks=callbacks
 
     )
@@ -411,6 +415,8 @@ for (i, user_test) in enumerate(users_test):
     model_keras_path = os.path.join(experiment_save_path, f'model_{user_test}.keras')
     best_model.save(model_keras_path)
     # Saving the history and parameters
+    with open(os.path.join(experiment_save_path, 'best_hyperparameters.pkl'), 'wb') as f:
+        pickle.dump(best_hps.values, f)  # Save the hyperparameters as a dictionary
     with open(os.path.join(experiment_save_path, 'train_val_dicts.pkl'), 'wb') as f:
         pickle.dump([train_dict, val_dict], f)
     with open(os.path.join(experiment_save_path, 'data_parameters.pkl'), 'wb') as f:

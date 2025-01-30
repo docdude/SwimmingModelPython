@@ -355,7 +355,7 @@ class LearningData(object):
                         majority_thresh=0):
         """
         Compile windows based on window and slide lengths.
-        :param norm_type: Window normalization type: 'statistical', 'statistical_combined' or 'mean'
+        :param norm_type: Window normalization type: 'statistical', 'statistical_combined' , 'tanh_scaled' or 'mean'
         :param label_type: Labeling type: 'majority', 'proportional', 'multi_class', or 'sparse'
         :param multi_class_thresh: Threshold above which a label is assigned under multi class labeling. Only used if
                                     label_type = 'multi_class'
@@ -371,6 +371,7 @@ class LearningData(object):
                 temp_user_windows = {
                     label: {
                         'data': np.zeros((10000, self.win_len, len(self.data_columns))),
+                        'raw_label': np.zeros((10000, self.win_len), dtype=int), # For raw labels used in GAN
                         'sparse_label': np.zeros(10000, dtype=int),  # 1D array for sparse labels
                         'one_hot_label': np.zeros((10000, len(self.labels)), dtype=int),  # For one-hot labels
                         'stroke_labels': np.zeros((10000, self.win_len, len(self.stroke_labels)), dtype=int)  # Ensure integer dtype
@@ -416,6 +417,7 @@ class LearningData(object):
 
                         # Assign data and labels to temporary structures
                         temp_user_windows[majority_label]['data'][cnt_user_label[majority_label]] = win_data
+                        temp_user_windows[majority_label]['raw_label'][cnt_user_label[majority_label]] = win_labels
                         temp_user_windows[majority_label]['sparse_label'][cnt_user_label[majority_label]] = majority_label
                         temp_user_windows[majority_label]['one_hot_label'][cnt_user_label[majority_label]] = win_label_cat
                         temp_user_windows[majority_label]['stroke_labels'][cnt_user_label[majority_label]] = win_stroke_labels
@@ -429,6 +431,7 @@ class LearningData(object):
                     else:
                         self.data_windows[group][label][user] = {
                             'data': np.copy(temp_user_windows[label]['data'][0:cnt_user_label[label]]),
+                            'raw_label': np.copy(temp_user_windows[label]['raw_label'][0:cnt_user_label[label]]),
                             'sparse_label': np.copy(temp_user_windows[label]['sparse_label'][0:cnt_user_label[label]]),
                             'one_hot_label': np.copy(temp_user_windows[label]['one_hot_label'][0:cnt_user_label[label]]),
                             'stroke_labels': np.copy(temp_user_windows[label]['stroke_labels'][0:cnt_user_label[label]])
@@ -451,7 +454,8 @@ class LearningData(object):
         use_4D=False, 
         swim_style_output=True, 
         stroke_label_output=True,
-        return_stroke_mask=False  # New parameter to control stroke mask return
+        return_stroke_mask=False,  # New parameter to control stroke mask return
+        return_raw_labels=False
     ):
         """
         A generator that yields a random set of windows with optional stroke mask
@@ -470,6 +474,7 @@ class LearningData(object):
         group_probs = [self.group_probs[group] for group in groups]
         while True:
             batch_data = np.zeros((batch_size, self.win_len, len(self.data_columns)))
+            batch_raw_labels = np.zeros((batch_size, self.win_len), dtype=int)  
             batch_labels = np.zeros(batch_size, dtype=int)
             batch_labels_cat = np.zeros((batch_size, len(self.labels)), dtype=int)
             batch_stroke_labels = np.zeros((batch_size, self.win_len, len(self.stroke_labels)), dtype=int)
@@ -489,6 +494,7 @@ class LearningData(object):
 
                 r_win = np.random.choice(len(self.data_windows[r_group][r_label][r_user]['data']))
                 batch_data[i, :, :] = self.data_windows[r_group][r_label][r_user]['data'][r_win]
+                batch_raw_labels[i] = self.data_windows[r_group][r_label][r_user]['raw_label'][r_win]
                 batch_labels[i] = self.data_windows[r_group][r_label][r_user]['sparse_label'][r_win]
                 batch_labels_cat[i] = self.data_windows[r_group][r_label][r_user]['one_hot_label'][r_win]
                 batch_stroke_labels[i] = self.data_windows[r_group][r_label][r_user]['stroke_labels'][r_win]
@@ -545,13 +551,23 @@ class LearningData(object):
                             }
                         )
                     else:
-                        yield (
-                            batch_data,
-                            {
-                                'swim_style_output': batch_labels, 
-                                'stroke_label_output': batch_stroke_labels
-                            }
-                        )
+                        if return_raw_labels:
+                            yield (
+                                batch_data,
+                                {
+                                    'swim_style_output': batch_labels, 
+                                    'raw_labels': batch_raw_labels,
+                                    'stroke_label_output': batch_stroke_labels
+                                }
+                            )                           
+                        else:
+                            yield (
+                                batch_data,
+                                {
+                                    'swim_style_output': batch_labels, 
+                                    'stroke_label_output': batch_stroke_labels
+                                }
+                            )
                 elif swim_style_output:
                     yield (
                         batch_data, batch_labels
@@ -638,7 +654,7 @@ class LearningData(object):
         return x_val, y_val_sparse, y_val_cat, y_stroke_val
 
 
-    def get_windows_dict(self, label_user_dict, return_weights=False, return_mask=False, transition_label=0):
+    def get_windows_dict(self, label_user_dict, return_weights=False, return_mask=False, transition_label=0, return_raw_labels=False):
         """
         Get all windows from a set of users.
 
@@ -657,6 +673,7 @@ class LearningData(object):
             stroke_mask (optional): Mask for stroke labels to mask counting 0 strokes in transition(combined 0,5) class (if return_mask is True).
         """
         x_val = None
+        y_val_raw_new = None
         y_val_sparse = None
         y_val_cat = None
         y_stroke_val = None
@@ -669,6 +686,7 @@ class LearningData(object):
                 if user in self.data_windows['original'][label].keys():
                     # Extract data, swim style labels, and stroke labels
                     x_val_new = self.data_windows['original'][label][user]['data']
+                    y_val_raw_new = self.data_windows['original'][label][user]['raw_label']
                     y_val_sparse_new = self.data_windows['original'][label][user]['sparse_label']
                     y_val_cat_new = self.data_windows['original'][label][user]['one_hot_label']
                     y_stroke_val_new = self.data_windows['original'][label][user]['stroke_labels']
@@ -676,6 +694,7 @@ class LearningData(object):
                     # Initialize or concatenate
                     if x_val is None:
                         x_val = x_val_new
+                        y_val_raw = y_val_raw_new
                         y_val_sparse = y_val_sparse_new
                         y_val_cat = y_val_cat_new
                         y_stroke_val = y_stroke_val_new
@@ -683,6 +702,7 @@ class LearningData(object):
                         folds['stop'].append(len(x_val_new))
                     else:
                         x_val = np.concatenate((x_val, x_val_new), axis=0)
+                        y_val_raw = np.concatenate((y_val_raw, y_val_raw_new), axis=0)
                         y_val_sparse = np.concatenate((y_val_sparse, y_val_sparse_new), axis=0)
                         y_val_cat = np.concatenate((y_val_cat, y_val_cat_new), axis=0)
                         y_stroke_val = np.concatenate((y_stroke_val, y_stroke_val_new), axis=0)
@@ -718,6 +738,9 @@ class LearningData(object):
                     stroke_mask[idx, :, :] = 0  # Mask the combined data for transition labels          
 
             results.append(stroke_mask)
+
+        if return_raw_labels:
+            results.append(y_val_raw)
 
         return tuple(results)
 

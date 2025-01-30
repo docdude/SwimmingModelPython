@@ -373,7 +373,7 @@ for (i, user_test) in enumerate(users_test):
                 monitor2='val_swim_style_output_weighted_categorical_accuracy',
                 mode1='max',
                 mode2='max',
-                patience=5,
+                patience=10,
                 restore_best_weights=True
             )
         ]
@@ -386,14 +386,14 @@ for (i, user_test) in enumerate(users_test):
     
 
         # Pass to model.fit
-    best_model = tune_lstm_dual.run_hyperparameter_tuning(
+    best_model, best_hps = tune_lstm_dual.run_hyperparameter_tuning(
         input_shape, 
         data_parameters, 
         training_parameters,
         class_weights=None,
         gen=gen,  
         validation_data=validation_data,
-        experiment_save_path=run_name,
+        run_name=run_name,
         callbacks=callbacks
 
     )
@@ -406,6 +406,8 @@ for (i, user_test) in enumerate(users_test):
     model_keras_path = os.path.join(experiment_save_path, f'model_{user_test}.keras')
     best_model.save(model_keras_path)
     # Saving the history and parameters
+    with open(os.path.join(experiment_save_path, 'best_hyperparameters.pkl'), 'wb') as f:
+        pickle.dump(best_hps.values, f)  # Save the hyperparameters as a dictionary
     with open(os.path.join(experiment_save_path, 'train_val_dicts.pkl'), 'wb') as f:
         pickle.dump([train_dict, val_dict], f)
     with open(os.path.join(experiment_save_path, 'data_parameters.pkl'), 'wb') as f:

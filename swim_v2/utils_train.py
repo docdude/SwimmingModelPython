@@ -165,8 +165,8 @@ class F1Score(tf.keras.metrics.Metric):
         return 2 * ((p * r) / (p + r + tf.keras.backend.epsilon()))
 
     def reset_state(self):
-        self.precision.reset_states()
-        self.recall.reset_states()
+        self.precision.reset_state()
+        self.recall.reset_state()
 
     def get_config(self):
         config = super().get_config()
@@ -320,7 +320,7 @@ class CombinedMetricCallback(tf.keras.callbacks.Callback):
         combined = combined_metric(logs, alpha=self.alpha)
         logs['val_combined_metric'] = combined
         print(f"Epoch {epoch + 1}: val_combined_metric = {combined:.4f}")
-           
+
 class CombinedEarlyStopping(tf.keras.callbacks.Callback):
     def __init__(self, monitor1, monitor2, mode1='max', mode2='max', patience=5, restore_best_weights=True):
         super(CombinedEarlyStopping, self).__init__()

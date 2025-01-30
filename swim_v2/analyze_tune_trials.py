@@ -233,8 +233,8 @@ def main(log_dir, metric_name="epoch_weighted_f1_score", top_n=5, last_n_epochs=
 
 
 if __name__ == "__main__":
-    run_name = "tune_swim_lstm2"
-    metric_name = "epoch_weighted_categorical_accuracy"
+    run_name = "tune_swim_stroke_lstm2_weighted"
+    metric_name = "epoch_combined_metric"
     save_path = f'/Users/juanloya/Documents/SwimmingModelPython/swim_v2/best_hyperparameters/{run_name}'
     log_base_dir = f'/Users/juanloya/Documents/SwimmingModelPython/swim_v2/logs/{run_name}'
     main(log_base_dir, metric_name=metric_name, top_n=5, last_n_epochs=15, save_path=save_path)

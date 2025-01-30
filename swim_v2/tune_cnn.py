@@ -1,7 +1,7 @@
 # tune_cnn.py
 import tensorflow as tf
 from keras_tuner import HyperModel, RandomSearch, BayesianOptimization
-from utils_train import compile_model, weighted_binary_crossentropy_smooth_class, EarlyStoppingLogger, CombinedEarlyStopping
+from utils_train import compile_model, weighted_binary_crossentropy_smooth_class, EarlyStoppingLogger, CombinedEarlyStopping, CombinedMetricCallback
 import keras_tuner as kt
 import pickle
 import os
@@ -522,27 +522,8 @@ def get_tensorboard_callback(log_dir):
     )
     return tensorboard_callback
 
-def combined_metric(logs, alpha=0.5):
-    """
-    Combine two metrics with a weighted harmonic mean.
-    
-    :param logs: Dictionary containing logged metrics (e.g., logs from callbacks).
-    :param alpha: Weight for the first metric (0 ≤ alpha ≤ 1). The second metric weight will be 1 - alpha.
-    :return: Combined metric value.
-    """
-    metric1 = logs.get('val_weighted_f1_score', 0.0)  # Stroke branch
-    metric2 = logs.get('val_weighted_categorical_accuracy', 0.0)  # Swim style branch
-    
-    # Avoid division by zero
-    if metric1 == 0 or metric2 == 0:
-        return 0.0
-    
-    # Calculate the weighted harmonic mean
-    harmonic_mean = 2 / ((alpha / metric1) + ((1 - alpha) / metric2))
-    return harmonic_mean
 
-
-def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters, class_weights, gen, validation_data, experiment_save_path="", callbacks=None):
+def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters, class_weights, gen, validation_data, run_name="", callbacks=None):
     # Create the hypermodel
     hypermodel = SwimStrokeHyperModel(input_shape, training_parameters, class_weights, data_parameters)
 
@@ -552,12 +533,7 @@ def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters,
         return None  # Skip this trial
     
     if training_parameters['swim_style_output'] and training_parameters['stroke_label_output']:
-        # Define the combined objective
-        def combined_logs(logs):
-            alpha = 0.5  # Weight for stroke branch
-            return combined_metric(logs, alpha)
-        objective = kt.Objective(lambda logs: combined_logs(logs), direction='max')
-
+        objective = kt.Objective('val_combined_metric', direction='max')
     elif training_parameters['swim_style_output']:
         objective=kt.Objective('val_weighted_categorical_accuracy', direction='max')
     else:
@@ -571,7 +547,7 @@ def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters,
         objective=objective,
         max_trials=100,  # Number of trials (adjust based on resources)
         num_initial_points=20,  # Number of random points to start the search
-        directory='hyperparameter_tuning_swim_stroke100',
+        directory=f'hyperparameter_{run_name}',
         project_name='swim_stroke_model',
         max_consecutive_failed_trials=10 # Increase max_failures
 
@@ -579,7 +555,7 @@ def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters,
 
            
     # Set up TensorBoard callback
-    log_dir = f"logs/tune_swim_stroke100/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    log_dir = f"logs/{run_name}/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
     tensorboard_callback = get_tensorboard_callback(log_dir)
 
     # Add TensorBoard callback to the list of callbacks
@@ -587,7 +563,7 @@ def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters,
         callbacks = []
     callbacks.append(tensorboard_callback)
     # Add debugging callback
-    #callbacks.append(DebugCallback())
+    callbacks.append(DebugCallback())
     # Start the search
 
     tuner.search(
@@ -604,17 +580,12 @@ def run_hyperparameter_tuning(input_shape, data_parameters, training_parameters,
     # Get the best hyperparameters
     best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
 
-    # Save the best hyperparameters to a pickle file in the specified directory
-    best_hyperparameters_path = os.path.join(experiment_save_path, 'best_hyperparameters.pkl')
-    with open(best_hyperparameters_path, 'wb') as f:
-        pickle.dump(best_hps.values, f)  # Save the hyperparameters as a dictionary
-
-    print(f"Best hyperparameters saved to: {best_hyperparameters_path}")
+ 
 
     # Retrieve the best model
     best_model = tuner.get_best_models(num_models=1)[0]
     
-    return best_model
+    return best_model, best_hps
 
 if __name__ == '__main__':
     input_shape = (180, 6, 1)
@@ -645,15 +616,18 @@ if __name__ == '__main__':
                         'stroke_label_output': tf.random.uniform((64, 180, 1), minval=0, maxval=2, dtype=tf.int32),
                     }
                 )
-        # Set up the combined early stopping callback
-        callbacks = [CombinedEarlyStopping(
-            monitor1='val_weighted_f1_score',
-            monitor2='val_weighted_categorical_accuracy',
-            mode1='max',
-            mode2='max',
-            patience=5,
-            restore_best_weights=True
-        )]
+         # Set up the combined early stopping callback
+        callbacks = [
+            CombinedMetricCallback(alpha=0.5),
+            CombinedEarlyStopping(
+                monitor1='val_stroke_label_output_weighted_f1_score',
+                monitor2='val_swim_style_output_weighted_categorical_accuracy',
+                mode1='max',
+                mode2='max',
+                patience=10,
+                restore_best_weights=True
+            )
+        ]
     elif training_parameters['swim_style_output']:  # Only swim style output
         def gen():
             while True:
