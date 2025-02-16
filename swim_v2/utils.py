@@ -552,7 +552,7 @@ def calculate_stroke_label_distribution(label_user_dict, swimming_data, data_typ
     sklearn_class_weights = dict(enumerate(weights))
     print("  Sklearn Class Weights:", sklearn_class_weights)
     sample_weights = create_balanced_sampler(y_stroke_val, method='sklearn')
-    print("  Sample Weights:", sample_weights)
+    #print("  Sample Weights:", sample_weights)
 
     return probabilities, stroke_label_1_mean, initial_bias, class_weights
 

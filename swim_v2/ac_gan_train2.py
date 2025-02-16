@@ -90,8 +90,8 @@ swimming_data.compile_windows(norm_type=data_parameters['window_normalization'],
 
 # GAN training parameters
 gan_training_parameters = {
-    'lr_generator': 0.0001,
-    'lr_discriminator': 0.0000015,
+    'lr_generator': 0.0002,
+    'lr_discriminator': 0.0001,
     'beta_1': 0.5,
     'batch_size': 64,
     'max_epochs': 300,
@@ -217,17 +217,14 @@ def compute_batch_class_weights(batch_swim_styles):
     )
     return class_weights_tensor
 
-def compute_batch_sample_weights(batch_labels, return_weights=True):
+def compute_batch_sample_weights(batch_labels):
     batch_labels_flat = batch_labels.flatten()
     sample_weights = compute_sample_weight('balanced', batch_labels_flat)
     # Reshape sample weights to match the original batch label shape
     sample_weights = sample_weights.reshape(batch_labels.shape[:-1])
     #sample_weights = sample_weights.squeeze(axis=-1)
-    if return_weights:
-        # Convert to a TensorFlow tensor with the desired shape
-        sample_weights_tensor = tf.convert_to_tensor(sample_weights, dtype=tf.float32)
-    else: 
-        sample_weights_tensor = tf.ones(sample_weights.shape, dtype=tf.float32)
+    # Convert to a TensorFlow tensor with the desired shape
+    sample_weights_tensor = tf.convert_to_tensor(sample_weights, dtype=tf.float32)
     
     # Ensure the tensor has the correct shape (64, 180)
     #sample_weights_tensor = tf.squeeze(sample_weights_tensor, axis=-1)#tf.reshape(sample_weights_tensor, batch_labels.shape)
@@ -360,7 +357,9 @@ def train_step2(real_data, real_styles, real_strokes,
                gen_optimizer, disc_optimizer,
                batch_size, latent_dim, style_weights, stroke_weights):
 
-
+    λ_style = 1.0
+    λ_stroke = 1.0
+    λ_pred = 1.0
     noise_gen = tf.random.normal(shape=(batch_size, latent_dim), mean=0.0, stddev=1.0)
     noise_disc = tf.random.normal(shape=(batch_size, latent_dim), mean=0.0, stddev=1.0)
     real_styles = tf.convert_to_tensor(real_styles, dtype=tf.int64)
@@ -466,149 +465,122 @@ def train_step2(real_data, real_styles, real_strokes,
 
     return total_disc_loss, d_loss_real, d_loss_fake, total_gen_loss, style_loss, stroke_loss
 
+
+def progressive_label_smoothing(epoch, real_labels, min_smooth=0.8, max_smooth=0.95):
+    """Progressive label smoothing that increases with epochs"""
+    smoothing = min_smooth + (max_smooth - min_smooth) * (1 - np.exp(-epoch/50))
+    return real_labels * smoothing + (1 - smoothing) * 0.5
+
+def adaptive_learning_rate(base_lr, epoch, decay_factor=0.95, min_lr=1e-6):
+    """Adaptive learning rate based on training progress"""
+    return max(base_lr * (decay_factor ** (epoch // 10)), min_lr)
+
 @tf.function
 def train_step3(real_data, real_styles, real_strokes,
                generator, discriminator,
                gen_optimizer, disc_optimizer,
-               batch_size, latent_dim, style_weights, stroke_weights):
-
-    # Initialize losses to avoid UnboundLocalError
-    total_disc_loss = tf.constant(0.0)
-    d_loss_real = tf.constant(0.0)
-    d_loss_fake = tf.constant(0.0)
-    total_gen_loss = tf.constant(0.0)
-    style_loss = tf.constant(0.0)
-    stroke_loss = tf.constant(0.0)
-
+               batch_size, latent_dim, style_weights, stroke_weights, epoch):
+    
     noise_gen = tf.random.normal(shape=(batch_size, latent_dim), mean=0.0, stddev=1.0)
     noise_disc = tf.random.normal(shape=(batch_size, latent_dim), mean=0.0, stddev=1.0)
+    
+    # Convert inputs to appropriate types
     real_styles = tf.convert_to_tensor(real_styles, dtype=tf.int64)
     real_strokes = tf.convert_to_tensor(real_strokes, dtype=tf.int64)
-    # Generator input: fake_styles as (batch_size,) for embedding layer
-    #fake_styles = tf.random.uniform([batch_size], minval=0, maxval=num_styles, dtype=tf.int32)
-    #fake_styles = tf.gather(real_styles, tf.random.uniform([batch_size], 0, batch_size, dtype=tf.int64))
-   # tf.print(fake_styles)
-    #fake_strokes_disc = tf.gather(real_strokes, tf.random.uniform([batch_size], 0, batch_size, dtype=tf.int64))
-    #tf.print(fake_strokes_disc)
-    # Stroke probabilities derived from empirical dataset
-    #fake_styles = real_styles
-    #fake_strokes_disc = real_strokes
-    """
-    stroke_probs = {0: 0.0, 1: 0.0156, 2: 0.0137, 3: 0.0138, 4: 0.0189, 5: 0.0}  
-    #tf.print(fake_styles)
-    # Convert dictionary to tensor
-    stroke_probs_tensor = tf.convert_to_tensor(list(stroke_probs.values()))
-
-    # Gather stroke probability for each sample's swim style
-    stroke_prob_selected = tf.gather(stroke_probs_tensor, fake_styles)  # Works for 1D fake_styles
-    #tf.print(stroke_prob_selected)
-    # Expand dimensions to match expected shape (batch_size, 180, 1)
-
-    stroke_prob_selected = tf.expand_dims(stroke_prob_selected, axis=-1)  # (batch_size, 1)
-    stroke_prob_selected = tf.expand_dims(stroke_prob_selected, axis=-1)  # (batch_size, 1, 1)
-    stroke_prob_selected = tf.tile(stroke_prob_selected, [1, 180, 1])  # (batch_size, 180, 1)
-    #tf.print(stroke_prob_selected)
-    # Sample strokes based on probability for discriminator
-    fake_strokes_disc = tf.where(
-        tf.random.uniform([batch_size, 180, 1]) < stroke_prob_selected,
-        tf.ones([batch_size, 180, 1]), 
-        tf.zeros([batch_size, 180, 1])
-    )
-    #tf.print(fake_strokes_disc)
-    # Sample strokes separately for generator (ensuring variation)
-    fake_strokes_gen = tf.where(
-        tf.random.uniform([batch_size, 180, 1]) < stroke_prob_selected,
-        tf.ones([batch_size, 180, 1]), 
-        tf.zeros([batch_size, 180, 1])
-    )
-    """
-    # Ensure style_weights is indexed correctly
-    #style_weights = tf.gather(style_weights, tf.squeeze(real_styles, axis=-1))  # Shape: (64, 180)
-    #stroke_weights = tf.gather(stroke_weights, tf.squeeze(real_strokes, axis=-1))
-
-    with tf.GradientTape() as disc_tape:
+    
+    # Extract real sensor data (first 6 channels)
+    real_sensors = real_data[..., :6]
+    
+    with tf.GradientTape() as disc_tape, tf.GradientTape() as gen_tape:
+        # Generate fake data
         fake_data = generator([noise_disc, real_styles, real_strokes], training=True)
+        fake_sensors = fake_data[..., :6]
+        
+        # Get discriminator outputs for real and fake data
         real_output = discriminator(real_data, training=True)
         fake_output = discriminator(fake_data, training=True)
-
+        
+        # Unpack discriminator outputs
         real_fake_real, style_real, stroke_real = real_output
         real_fake_fake, style_fake, stroke_fake = fake_output
-
-        # Apply random label smoothing mild
-        #real_labels = tf.random.uniform(tf.shape(real_fake_real), minval=0.95, maxval=1.0)
-        #fake_labels = tf.random.uniform(tf.shape(real_fake_fake), minval=0.0, maxval=0.1)
-        # Apply random label smoothing moderate
-
-        #real_labels = tf.random.uniform(tf.shape(real_fake_real), minval=0.9, maxval=1.0)
-        #fake_labels = tf.random.uniform(tf.shape(real_fake_fake), minval=0.1, maxval=0.3)
-        # Apply random label smoothing None
-
-        real_labels = tf.ones_like(real_fake_real)
+        
+        # Progressive label smoothing
+        real_labels = progressive_label_smoothing(epoch, tf.ones_like(real_fake_real))
         fake_labels = tf.zeros_like(real_fake_fake)
-
-        # Discriminator loss
+        
+        # Compute various losses
+        # Adversarial losses
         d_loss_real = tf.reduce_mean(tf.keras.losses.binary_crossentropy(real_labels, real_fake_real))
-        style_loss_real = tf.reduce_mean(style_weights * tf.keras.losses.mean_squared_error(real_styles, style_real))
-        stroke_loss_real = tf.reduce_mean(stroke_weights * tf.keras.losses.binary_crossentropy(real_strokes, stroke_real))
-
         d_loss_fake = tf.reduce_mean(tf.keras.losses.binary_crossentropy(fake_labels, real_fake_fake))
+        
+        # Style classification losses
+        style_loss_real = tf.reduce_mean(style_weights * tf.keras.losses.mean_squared_error(real_styles, style_real))
         style_loss_fake = tf.reduce_mean(style_weights * tf.keras.losses.mean_squared_error(real_styles, style_fake))
+        
+        # Stroke detection losses
+        stroke_loss_real = tf.reduce_mean(stroke_weights * tf.keras.losses.binary_crossentropy(real_strokes, stroke_real))
         stroke_loss_fake = tf.reduce_mean(stroke_weights * tf.keras.losses.binary_crossentropy(real_strokes, stroke_fake))
-        gradient_penalty = compute_gradient_penalty(real_data, fake_data)
-        # Normalize losses dynamically
-        total_loss_values = tf.stack([d_loss_real, d_loss_fake, style_loss_real, style_loss_fake, stroke_loss_real, stroke_loss_fake])
-        loss_weights = total_loss_values / tf.reduce_sum(total_loss_values + 1e-8)  # Normalize to sum to 1
-
-        # Compute weighted total discriminator loss
+        
+        # Additional losses for generator
+        spectral_loss_term = spectral_loss(real_sensors, fake_sensors)
+        temporal_loss_term = temporal_consistency_loss(fake_sensors)
+        distribution_loss_term = sensor_distribution_loss(real_sensors, fake_sensors)
+        
+        # Gradient penalty
+        gradient_penalty = compute_gradient_penalty(real_data, fake_data, discriminator)
+        
+        # Compute total losses with dynamic weighting
+        disc_loss_weights = tf.nn.softmax(tf.stack([
+            d_loss_real, d_loss_fake, 
+            style_loss_real, style_loss_fake,
+            stroke_loss_real, stroke_loss_fake,
+            gradient_penalty
+        ]))
+        
         total_disc_loss = (
-            loss_weights[0] * d_loss_real +
-            loss_weights[1] * d_loss_fake +
-            loss_weights[2] * style_loss_real +
-            loss_weights[3] * style_loss_fake +
-            loss_weights[4] * stroke_loss_real +
-            loss_weights[5] * stroke_loss_fake
+            disc_loss_weights[0] * d_loss_real +
+            disc_loss_weights[1] * d_loss_fake +
+            disc_loss_weights[2] * style_loss_real +
+            disc_loss_weights[3] * style_loss_fake +
+            disc_loss_weights[4] * stroke_loss_real +
+            disc_loss_weights[5] * stroke_loss_fake +
+            0.1 * disc_loss_weights[6] * gradient_penalty
         )
-        #total_disc_loss = (d_loss_real + style_loss_real + stroke_loss_real + d_loss_fake + style_loss_fake  + stroke_loss_fake)# + (0 * gradient_penalty))
-       # total_disc_loss = (
-        #    0.5 * (d_loss_real + d_loss_fake) + 
-         #   0.25 * (2*style_loss_real + 2*style_loss_fake) + 
-          #  0.25 * (stroke_loss_real + stroke_loss_fake)
-       # )
-
-    disc_grads = disc_tape.gradient(total_disc_loss, discriminator.trainable_variables)
-    disc_grads = [tf.clip_by_value(g, -1., 1.) for g in disc_grads]
-
-    disc_optimizer.apply_gradients(zip(disc_grads, discriminator.trainable_variables))
-
-    # Generator Training
-    # --- Generator Training (Only on Even Steps) ---
-    #total_gen_loss = tf.constant(0.0)  # Default if generator isn't trained this step
-
-    #for _ in range(3):  # Double generator training frequency  
-    with tf.GradientTape() as gen_tape:
-        fake_data = generator([noise_gen, real_styles, real_strokes], training=True)
-        fake_output = discriminator(fake_data, training=True)
-        real_fake_fake, style_fake, stroke_fake = fake_output
-
-        g_loss = tf.reduce_mean(tf.keras.losses.binary_crossentropy(tf.ones_like(real_fake_fake), real_fake_fake))
-        style_loss = tf.reduce_mean(style_weights * tf.keras.losses.mean_squared_error(real_styles, style_fake))
-        stroke_loss = tf.reduce_mean(stroke_weights * tf.keras.losses.binary_crossentropy(real_strokes, stroke_fake))  # Use fake_strokes_gen
-
-        # Normalize generator losses dynamically
-        gen_loss_values = tf.stack([g_loss, style_loss, stroke_loss])
-        gen_loss_weights = gen_loss_values / tf.reduce_sum(gen_loss_values + 1e-8)  # Normalize to sum to 1
+        
+        # Generator loss with dynamic weighting
+        gen_loss_weights = tf.nn.softmax(tf.stack([
+            tf.reduce_mean(tf.keras.losses.binary_crossentropy(tf.ones_like(real_fake_fake), real_fake_fake)),
+            style_loss_fake,
+            stroke_loss_fake,
+            spectral_loss_term,
+            temporal_loss_term,
+            distribution_loss_term
+        ]))
         
         total_gen_loss = (
-            gen_loss_weights[0] * g_loss +
-            gen_loss_weights[1] * style_loss +
-            gen_loss_weights[2] * stroke_loss
+            gen_loss_weights[0] * tf.reduce_mean(tf.keras.losses.binary_crossentropy(tf.ones_like(real_fake_fake), real_fake_fake)) +
+            gen_loss_weights[1] * style_loss_fake +
+            gen_loss_weights[2] * stroke_loss_fake +
+            0.1 * gen_loss_weights[3] * spectral_loss_term +
+            0.05 * gen_loss_weights[4] * temporal_loss_term +
+            0.1 * gen_loss_weights[5] * distribution_loss_term
         )
-        #total_gen_loss = g_loss + style_loss + stroke_loss
-
+    
+    # Compute and apply gradients with clipping
+    disc_grads = disc_tape.gradient(total_disc_loss, discriminator.trainable_variables)
     gen_grads = gen_tape.gradient(total_gen_loss, generator.trainable_variables)
+    
+    # Clip gradients
+    disc_grads = [tf.clip_by_norm(g, 1.0) for g in disc_grads]
+    gen_grads = [tf.clip_by_norm(g, 1.0) for g in gen_grads]
+    
+    # Apply gradients
+    disc_optimizer.apply_gradients(zip(disc_grads, discriminator.trainable_variables))
     gen_optimizer.apply_gradients(zip(gen_grads, generator.trainable_variables))
-
-    return total_disc_loss, d_loss_real, d_loss_fake, total_gen_loss, style_loss, stroke_loss
+    
+    return (total_disc_loss, d_loss_real, d_loss_fake, total_gen_loss, 
+            style_loss_fake, stroke_loss_fake, spectral_loss_term, 
+            distribution_loss_term)
 
 def train_gan(generator, discriminator, data_generator, epochs, steps_per_epoch, x_val, y_val_sparse, y_stroke_val, y_val_raw):
     for epoch in range(epochs):
@@ -637,10 +609,10 @@ def train_gan(generator, discriminator, data_generator, epochs, steps_per_epoch,
                 # If you're at the end of an epoch and don't have a full batch, break or adjust your steps
                 break
 
-            style_weights = compute_batch_sample_weights(raw_labels_3d, return_weights=True)
-            stroke_weights = compute_batch_sample_weights(real_strokes, return_weights=True)
+            style_weights = compute_batch_sample_weights(raw_labels_3d)
+            stroke_weights = compute_batch_sample_weights(real_strokes)
             # One train step
-            total_d_loss, d_loss_real, d_loss_fake, total_g_loss, style_loss, stroke_loss = train_step3(
+            total_d_loss, d_loss_real, d_loss_fake, total_g_loss, style_loss, stroke_loss = train_step2(
                 real_data_combined, raw_labels_3d, real_strokes,
                 generator, discriminator,
                 generator_optimizer, discriminator_optimizer,
@@ -747,16 +719,21 @@ def train_gan(generator, discriminator, data_generator, epochs, steps_per_epoch,
             #fake_styles_float = tf.round(fake_styles_float)
             print("Real raw style outputs:\n", y_val_raw)
             print("Fake style outputs:\n", fake_styles_float.numpy())
+            # Sum them up across the batch and/or timesteps
+            # For example, summing all strokes in the batch:
+            stroke_count = tf.reduce_sum(fake_strokes_bin)
 
             print("Rounded fake stroke outputs:\n", fake_strokes_bin.numpy())
-
+            print("Total fake stroke count:", stroke_count.numpy())
             real_stroke_count = np.sum(y_stroke_val)
-            fake_stroke_count = tf.reduce_sum(fake_strokes_bin)
+            fake_stroke_count = stroke_count#tf.reduce_sum(val_fake_data[..., 7]).numpy()
+
+            print(f"Real Stroke Count: {real_stroke_count} | Fake Stroke Count: {fake_stroke_count}")
            
             # Compare real vs fake data shapes (should both be [batch, 180, 8])
             print(f"\nValidation Stats:")
-            print(f"   Real data shape: {x_val.shape} (sensors + labels)")
-            print(f"   Generated shape: {val_fake_data.shape}")
+            print(f"Real data shape: {x_val.shape} (sensors + labels)")
+            print(f"Generated shape: {val_fake_data.shape}")
             real_mean = np.mean(x_val[..., :6])
             real_min = np.min(x_val[..., :6])
             real_max = np.max(x_val[..., :6])
@@ -766,8 +743,8 @@ def train_gan(generator, discriminator, data_generator, epochs, steps_per_epoch,
             fake_max = tf.reduce_max(val_fake_data[..., :6]).numpy()
             fake_std = tf.math.reduce_std(val_fake_data[..., :6]).numpy()
 
-            print(f"   Real stats | Mean: {real_mean:.2f}, Std: {real_std:.2f}, Min: {real_min:.2f}, Max: {real_max:.2f}")
-            print(f"   Fake stats | Mean: {fake_mean:.2f}, Std: {fake_std:.2f}, Min: {fake_min:.2f}, Max: {fake_max:.2f}")
+            print(f"Real stats | Mean: {real_mean:.2f}, Std: {real_std:.2f}, Min: {real_min:.2f}, Max: {real_max:.2f}")
+            print(f"Fake stats | Mean: {fake_mean:.2f}, Std: {fake_std:.2f}, Min: {fake_min:.2f}, Max: {fake_max:.2f}")
             if abs(real_mean - fake_mean) > 0.5:
                 print(f"Significant mean discrepancy: Real {real_mean:.2f} vs Fake {fake_mean:.2f}")
 
@@ -785,10 +762,10 @@ def train_gan(generator, discriminator, data_generator, epochs, steps_per_epoch,
                 tf.summary.scalar('real_std', real_std, step=step_global)
                 tf.summary.scalar('fake_std', fake_std, step=step_global)
                 #real_stroke_count = np.sum(x_val[..., 7])  # Count real stroke labels
-                #real_stroke_count = np.sum(y_stroke_val)
-               # fake_stroke_count = stroke_count#tf.reduce_sum(val_fake_data[..., 7]).numpy()
+                real_stroke_count = np.sum(y_stroke_val)
+                fake_stroke_count = stroke_count#tf.reduce_sum(val_fake_data[..., 7]).numpy()
 
-                print(f"\nReal Stroke Count: {real_stroke_count} | Fake Stroke Count: {fake_stroke_count}")
+                print(f"Real Stroke Count: {real_stroke_count} | Fake Stroke Count: {fake_stroke_count}")
                 tf.summary.scalar('real_stroke_count', real_stroke_count, step=step_global)
                 tf.summary.scalar('fake_stroke_count', fake_stroke_count, step=step_global)
                 fake_variance = tf.math.reduce_variance(val_fake_data, axis=0).numpy()
